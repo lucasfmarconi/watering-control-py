@@ -18,6 +18,11 @@ PIN_I2C_SDA = 25
 PIN_I2C_SCL = 26
 BH1750_ADDR = 0x23
 CA_FILE = "emqxsl-ca.der"  # DigiCert Global Root G2, DER
+
+# Soil sensor calibration (raw 12-bit ADC). Placeholder values: measure your own
+# sensor (see read_soil_pct) and replace them.
+SOIL_DRY_RAW = 2800  # sensor held in dry air
+SOIL_WET_RAW = 1200  # sensor submerged in water up to the marked line
 # endregion
 
 # region init
@@ -49,10 +54,44 @@ except Exception as e:
 
 
 def read_soil_pct():
-    return round((4095 - soil_adc.read()) * 100 / 4095)
+    """Return soil moisture as an integer percentage, 0 (dry) to 100 (wet).
+
+    Capacitive sensors output a higher voltage (higher ADC value) when dry and a
+    lower one when wet, so the reading is inverted and linearly mapped between
+    two calibration points:
+
+        pct = (SOIL_DRY_RAW - raw) * 100 / (SOIL_DRY_RAW - SOIL_WET_RAW)
+
+    The result is clamped to 0-100, since readings can fall outside the
+    calibrated range.
+
+    Calibration: print soil_adc.read() with the sensor in dry air and set
+    SOIL_DRY_RAW; then submerge it in water (up to the marked line) and set
+    SOIL_WET_RAW. Using the full 0-4095 range instead would never reach 0% or
+    100%, because real sensors only span part of the ADC range.
+    """
+
+    raw = soil_adc.read()
+    pct = (SOIL_DRY_RAW - raw) * 100 / (SOIL_DRY_RAW - SOIL_WET_RAW)
+    return max(0, min(100, round(pct)))
 
 
 def read_battery_v():
+    """Return the battery voltage in volts, rounded to 2 decimals.
+
+    The battery is wired to the ADC pin through a voltage divider that halves
+    it (the pin sees about Vbat / 2), because a LiPo can reach 4.2 V, above the
+    ADC's ~3.3 V range. The conversion is:
+
+        V = raw / 4095 * 6.6 * 1.1
+
+    - raw / 4095 * 3.3 would be the voltage at the pin, so * 6.6 (3.3 * 2)
+      undoes the divider and gives the battery voltage.
+    - 1.1 is an empirical correction for the ESP32 ADC, which is not exactly
+      linear at ATTN_11DB and does not match the nominal 3.3 V full scale.
+      Compare against a multimeter and adjust it if the reading is off.
+    """
+
     return round(bat_adc.read() / 4095 * 6.6 * 1.1, 2)
 
 
@@ -67,7 +106,7 @@ def read_lux():
 # endregion
 
 # region mqtt
-client = None
+mqtt_client = None
 
 
 def iso_utc():
@@ -125,31 +164,31 @@ def publish_readings():
     if dht_sensor is not None:
         try:
             dht_sensor.measure()
-            client.publish(topic("dht/temperature"), str(dht_sensor.temperature()))
-            client.publish(topic("dht/humidity"), str(dht_sensor.humidity()))
-            client.publish(topic("dht/data-timestamp"), ts)
+            mqtt_client.publish(topic("dht/temperature"), str(dht_sensor.temperature()))
+            mqtt_client.publish(topic("dht/humidity"), str(dht_sensor.humidity()))
+            mqtt_client.publish(topic("dht/data-timestamp"), ts)
         except OSError as e:
             print("DHT read failed:", e)
-    client.publish(topic("soil/moisture"), str(read_soil_pct()))
-    client.publish(topic("soil/data-timestamp"), ts)
-    client.publish(topic("battery/voltage"), str(read_battery_v()))
+    mqtt_client.publish(topic("soil/moisture"), str(read_soil_pct()))
+    mqtt_client.publish(topic("soil/data-timestamp"), ts)
+    mqtt_client.publish(topic("battery/voltage"), str(read_battery_v()))
     lux = read_lux()
     if lux is not None:
-        client.publish(topic("light/lux"), str(lux))
+        mqtt_client.publish(topic("light/lux"), str(lux))
 # endregion
 
 
 def recover():
     try:
-        client.publish(topic("status"), b"offline", retain=True)
-        client.disconnect()
+        mqtt_client.publish(topic("status"), b"offline", retain=True)
+        mqtt_client.disconnect()
     except Exception:
         pass
     machine.reset()
 
 
 try:
-    client = connect_mqtt()
+    mqtt_client = connect_mqtt()
 except OSError as e:
     print("MQTT connect failed:", e)
     recover()
@@ -157,14 +196,14 @@ except OSError as e:
 last_publish = time.ticks_add(time.ticks_ms(), -publish_interval_s * 1000)
 while True:
     try:
-        client.check_msg()
+        mqtt_client.check_msg()
         now = time.ticks_ms()
         if time.ticks_diff(now, last_publish) >= publish_interval_s * 1000:
             publish_readings()
             last_publish = now
         if pump_on_since is not None and time.ticks_diff(now, pump_on_since) >= pump_max_on_s * 1000:
             pump_set(False)
-            client.publish(topic("pump/state"), b"off")
+            mqtt_client.publish(topic("pump/state"), b"off")
     except OSError as e:
         print("MQTT error:", e)
         pump_set(False)
