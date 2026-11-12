@@ -70,5 +70,22 @@ class SaltValidTest(unittest.TestCase):
         self.assertFalse(calc.salt_valid(None, 55, 75))
 
 
+class SoilCalibrationTest(unittest.TestCase):
+    def test_valid(self):
+        self.assertTrue(calc.valid_soil_calibration(2800, 1200))
+        self.assertTrue(calc.valid_soil_calibration(0, 4095))
+
+    def test_equal_points(self):
+        self.assertFalse(calc.valid_soil_calibration(1500, 1500))
+
+    def test_out_of_range(self):
+        self.assertFalse(calc.valid_soil_calibration(4096, 1200))
+        self.assertFalse(calc.valid_soil_calibration(2800, -1))
+
+    def test_not_integers(self):
+        self.assertFalse(calc.valid_soil_calibration("2800", 1200))
+        self.assertFalse(calc.valid_soil_calibration(2800.5, 1200))
+
+
 if __name__ == "__main__":
     unittest.main()

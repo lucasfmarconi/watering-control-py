@@ -64,3 +64,11 @@ def salt_valid(moisture_pct, low, high):
     moisture_pct is None when the soil reading was invalid, which is never valid.
     """
     return moisture_pct is not None and low <= moisture_pct <= high
+
+
+def valid_soil_calibration(dry, wet):
+    """Return True if dry and wet are distinct integers within the 12-bit ADC range."""
+    for value in (dry, wet):
+        if not isinstance(value, int) or not 0 <= value <= 4095:
+            return False
+    return dry != wet

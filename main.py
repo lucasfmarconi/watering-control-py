@@ -1,3 +1,4 @@
+import json
 import ssl
 import time
 
@@ -20,6 +21,7 @@ PIN_I2C_SDA = 25
 PIN_I2C_SCL = 26
 BH1750_ADDR = 0x23
 BH1750_MEASURE_MS = 180  # max high-res measurement time
+CALIBRATION_FILE = "calibration.json"  # soil calibration set over MQTT, survives deep sleep
 CA_FILE = "emqxsl-ca.der"  # DigiCert Global Root G2, DER
 ADC_MAX = 4095  # 12-bit ADC full scale
 BATTERY_DIVIDER = 2  # the battery reaches the ADC pin through a divider that halves it
@@ -43,8 +45,9 @@ DEEP_SLEEP = getattr(config, "DEEP_SLEEP", True)  # set False in config.py while
 
 # Soil calibration (raw 12-bit ADC), set in config.py; see config.example.py for how
 # to measure them. The defaults are placeholders for a typical capacitive probe.
-SOIL_RAW_DRY = getattr(config, "SOIL_RAW_DRY", 2800)  # the "0%" point
-SOIL_RAW_WET = getattr(config, "SOIL_RAW_WET", 1200)  # the "100%" point
+# Precedence: config.py < calibration.json < retained control/soil_dry|soil_wet.
+soil_raw_dry = getattr(config, "SOIL_RAW_DRY", 2800)  # the "0%" point
+soil_raw_wet = getattr(config, "SOIL_RAW_WET", 1200)  # the "100%" point
 # endregion
 
 # region init
@@ -85,6 +88,43 @@ try:
 except (OSError, ValueError) as e:
     print("I2C init failed:", e)
     i2c = None
+
+
+def load_calibration():
+    """Apply the soil calibration saved by a previous cycle, if any."""
+    global soil_raw_dry, soil_raw_wet
+    try:
+        with open(CALIBRATION_FILE) as f:
+            saved = json.load(f)
+        dry, wet = saved["dry"], saved["wet"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    if calc.valid_soil_calibration(dry, wet):
+        soil_raw_dry, soil_raw_wet = dry, wet
+    else:
+        print("ignoring invalid", CALIBRATION_FILE)
+
+
+def save_calibration():
+    """Persist the soil calibration. Called only when it changed, to spare the flash."""
+    try:
+        with open(CALIBRATION_FILE, "w") as f:
+            json.dump({"dry": soil_raw_dry, "wet": soil_raw_wet}, f)
+    except OSError as e:
+        print("saving calibration failed:", e)
+
+
+def set_soil_calibration(dry, wet):
+    """Validate and apply a new soil calibration, saving it only if it changed."""
+    global soil_raw_dry, soil_raw_wet
+    if not calc.valid_soil_calibration(dry, wet):
+        print("invalid soil calibration:", dry, wet)
+        return
+    if (dry, wet) == (soil_raw_dry, soil_raw_wet):
+        return
+    soil_raw_dry, soil_raw_wet = dry, wet
+    save_calibration()
+    print("soil calibration: dry", dry, "wet", wet)
 
 
 def read_adc_median(adc, samples=ADC_SAMPLES, delay_ms=ADC_SAMPLE_DELAY_MS, microvolts=False):
@@ -155,7 +195,7 @@ def read_soil():
     lower one when wet, so the reading is inverted and linearly mapped between
     two calibration points (see calc.raw_to_percent):
 
-        pct = (SOIL_RAW_DRY - raw) * 100 / (SOIL_RAW_DRY - SOIL_RAW_WET)
+        pct = (soil_raw_dry - raw) * 100 / (soil_raw_dry - soil_raw_wet)
 
     The reading is checked before it is converted (calc.soil_error): a value at
     the ADC rails or a large spread means the probe is unplugged, shorted or
@@ -163,8 +203,8 @@ def read_soil():
     never looks like "0%, needs watering". Only valid readings are clamped to
     0-100.
 
-    Calibration lives in config.py (SOIL_RAW_DRY / SOIL_RAW_WET); read the
-    values from the soil/raw topic. Using the full 0-4095 range instead would
+    Calibration lives in config.py (SOIL_RAW_DRY / SOIL_RAW_WET) and can be
+    overridden over MQTT (see on_message); read the values from the soil/raw topic. Using the full 0-4095 range instead would
     never reach 0% or 100%, because real sensors only span part of the ADC
     range.
     """
@@ -173,7 +213,7 @@ def read_soil():
     error = calc.soil_error(raw, spread, ADC_MAX_SPREAD)
     if error is not None:
         return None, raw, spread, error
-    pct = calc.raw_to_percent(raw, SOIL_RAW_DRY, SOIL_RAW_WET)
+    pct = calc.raw_to_percent(raw, soil_raw_dry, soil_raw_wet)
     if pct is None:
         return None, raw, spread, "bad-calibration"
     return pct, raw, spread, None
@@ -244,6 +284,9 @@ def on_message(topic_bytes, msg):
 
     - interval: new sleep time between cycles in seconds (at least MIN_INTERVAL_S).
     - listen: new control listen window in seconds (at least MIN_LISTEN_S).
+    - soil_dry / soil_wet: new raw ADC value (0-4095) for the 0% / 100% soil point.
+      Applied now and saved to CALIBRATION_FILE when it changed; dry and wet must
+      differ.
 
     Invalid numbers are ignored. Control messages should be published retained,
     since the device is only listening briefly each cycle.
@@ -262,6 +305,10 @@ def on_message(topic_bytes, msg):
         elif cmd == "listen":
             control_listen_s = max(MIN_LISTEN_S, int(msg))
             print("control listen:", control_listen_s)
+        elif cmd == "soil_dry":
+            set_soil_calibration(int(msg), soil_raw_wet)
+        elif cmd == "soil_wet":
+            set_soil_calibration(soil_raw_dry, int(msg))
     except ValueError:
         print("invalid control payload:", cmd, msg)
 
@@ -378,6 +425,7 @@ def run_cycle():
         power.value(0)
 
 
+load_calibration()
 while True:
     run_cycle()
     if DEEP_SLEEP:
