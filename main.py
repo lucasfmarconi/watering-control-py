@@ -21,6 +21,7 @@ BH1750_ADDR = 0x23
 BH1750_MEASURE_MS = 180  # max high-res measurement time
 CA_FILE = "emqxsl-ca.der"  # DigiCert Global Root G2, DER
 ADC_MAX = 4095  # 12-bit ADC full scale
+BATTERY_DIVIDER = 2  # the battery reaches the ADC pin through a divider that halves it
 MS_PER_S = 1000
 CONTROL_LISTEN_S = 3  # default awake window to receive retained control messages
 MIN_LISTEN_S = 1  # lower bound for the "listen" command; 0 would make the board deaf to control
@@ -38,10 +39,24 @@ publish_interval_s = config.PUBLISH_INTERVAL_S
 control_listen_s = CONTROL_LISTEN_S
 
 power = machine.Pin(PIN_POWER_CTRL, machine.Pin.OUT, value=0)  # on only during a cycle
-soil_adc = machine.ADC(machine.Pin(PIN_SOIL))
-soil_adc.atten(machine.ADC.ATTN_11DB)
-bat_adc = machine.ADC(machine.Pin(PIN_BAT))
-bat_adc.atten(machine.ADC.ATTN_11DB)
+
+
+def setup_adc(pin_no):
+    """Create an ADC on pin_no covering ~0-3.3 V at 12 bits.
+
+    The ESP32 ADC is nonlinear near the rails (below ~0.1 V and above ~3.1 V at
+    11 dB), so readings close to 0 or 4095 are less trustworthy.
+    """
+    adc = machine.ADC(machine.Pin(pin_no))
+    adc.atten(machine.ADC.ATTN_11DB)
+    adc.width(machine.ADC.WIDTH_12BIT)
+    return adc
+
+
+soil_adc = setup_adc(PIN_SOIL)
+bat_adc = setup_adc(PIN_BAT)
+salt_adc = setup_adc(PIN_SALT)  # input-only pin, fine for ADC; read in a later task
+HAS_READ_UV = hasattr(bat_adc, "read_uv")  # factory-calibrated reading, if the firmware has it
 # endregion
 
 # region sensors
@@ -85,16 +100,17 @@ def read_battery_v():
 
     The battery is wired to the ADC pin through a voltage divider that halves
     it (the pin sees about Vbat / 2), because a LiPo can reach 4.2 V, above the
-    ADC's ~3.3 V range. The conversion is:
+    ADC's ~3.3 V range.
 
-        V = raw / 4095 * 6.6 * 1.1
-
-    - raw / 4095 * 3.3 would be the voltage at the pin, so * 6.6 (3.3 * 2)
-      undoes the divider and gives the battery voltage.
-    - 1.1 is an empirical correction for the ESP32 ADC, which is not exactly
-      linear at ATTN_11DB and does not match the nominal 3.3 V full scale.
-      Compare against a multimeter and adjust it if the reading is off.
+    - With ADC.read_uv() (HAS_READ_UV), which applies the factory calibration:
+      V = microvolts / 1e6 * BATTERY_DIVIDER.
+    - Otherwise: V = raw / 4095 * 6.6 * 1.1, where 6.6 is 3.3 * 2 (undoing the
+      divider) and 1.1 is an empirical correction for the ESP32 ADC, which is
+      not exactly linear at ATTN_11DB. Compare against a multimeter and adjust
+      it if the reading is off.
     """
+    if HAS_READ_UV:
+        return round(bat_adc.read_uv() / 1e6 * BATTERY_DIVIDER, 2)
     return round(bat_adc.read() / ADC_MAX * 6.6 * 1.1, 2)
 
 
