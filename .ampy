@@ -1,0 +1,4 @@
+AMPY_PORT=/dev/cu.usbserial-58EF0500101
+AMPY_BAUD=115200
+# macOS "Could not enter raw repl": try 2.0 and lower from there
+AMPY_DELAY=2.0
