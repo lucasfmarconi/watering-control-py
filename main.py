@@ -30,6 +30,10 @@ MIN_INTERVAL_S = 10  # lower bound for the "interval" command (protects the batt
 # Samples per ADC reading (10-20) and the pause between them
 ADC_SAMPLES = max(10, min(20, getattr(config, "ADC_SAMPLES", 15)))
 ADC_SAMPLE_DELAY_MS = getattr(config, "ADC_SAMPLE_DELAY_MS", 5)
+SENSOR_SETTLE_MS = getattr(config, "SENSOR_SETTLE_MS", 300)  # after GPIO4 goes high, before ADC reads
+DHT_SETTLE_MS = 1000  # DHT11 needs ~1 s after power-up
+DHT_RETRY_MS = 1000  # and at most one read per second
+DHT_ATTEMPTS = 3
 DEEP_SLEEP = getattr(config, "DEEP_SLEEP", True)  # set False in config.py while developing
 
 # Soil sensor calibration (raw 12-bit ADC). Placeholder values: measure your own
@@ -39,6 +43,7 @@ SOIL_WET_RAW = 1200  # sensor submerged in water up to the marked line
 # endregion
 
 # region init
+power_on_ms = None  # ticks when GPIO4 last went high
 publish_interval_s = config.PUBLISH_INTERVAL_S
 control_listen_s = CONTROL_LISTEN_S
 
@@ -97,6 +102,45 @@ def read_adc_median(adc, samples=ADC_SAMPLES, delay_ms=ADC_SAMPLE_DELAY_MS, micr
             time.sleep_ms(delay_ms)
         values.append(read())
     return calc.median(values), calc.spread(values)
+
+
+def power_sensors():
+    """Power the sensors (GPIO4 high) and remember when."""
+    global power_on_ms
+    power.value(1)
+    power_on_ms = time.ticks_ms()
+
+
+def wait_since_power(settle_ms):
+    """Sleep only for what is left of settle_ms since the sensors were powered.
+
+    Connecting Wi-Fi/MQTT already takes seconds, so this is normally a no-op.
+    """
+    if power_on_ms is None:
+        return
+    remaining = settle_ms - time.ticks_diff(time.ticks_ms(), power_on_ms)
+    if remaining > 0:
+        time.sleep_ms(remaining)
+
+
+def read_dht():
+    """Return (temperature, humidity) from the DHT11, or None if it never answers.
+
+    Waits for the sensor to settle after power-up and retries on OSError,
+    pausing DHT_RETRY_MS between attempts (the DHT11 allows one read per second).
+    """
+    if dht_sensor is None:
+        return None
+    wait_since_power(DHT_SETTLE_MS)
+    for attempt in range(DHT_ATTEMPTS):
+        try:
+            dht_sensor.measure()
+            return dht_sensor.temperature(), dht_sensor.humidity()
+        except OSError as e:
+            print("DHT read failed:", e)
+            if attempt < DHT_ATTEMPTS - 1:
+                time.sleep_ms(DHT_RETRY_MS)
+    return None
 
 
 def read_soil_pct():
@@ -248,14 +292,12 @@ def send(suffix, payload, retain=False):
 def publish_readings():
     """Read all sensors and publish them, skipping any that are unavailable."""
     ts = iso_utc()
-    if dht_sensor is not None:
-        try:
-            dht_sensor.measure()
-            send("dht/temperature", str(dht_sensor.temperature()))
-            send("dht/humidity", str(dht_sensor.humidity()))
-            send("dht/data-timestamp", ts)
-        except OSError as e:
-            print("DHT read failed:", e)
+    dht_reading = read_dht()
+    if dht_reading is not None:
+        send("dht/temperature", str(dht_reading[0]))
+        send("dht/humidity", str(dht_reading[1]))
+        send("dht/data-timestamp", ts)
+    wait_since_power(SENSOR_SETTLE_MS)
     send("soil/moisture", str(read_soil_pct()))
     send("soil/data-timestamp", ts)
     send("battery/voltage", str(read_battery_v()))
@@ -292,12 +334,12 @@ def radio_off():
 def run_cycle():
     """Run one awake cycle: connect, apply control messages, publish, disconnect.
 
-    Always leaves the sensor power off, even on failure, so the
+    Always leaves the sensor power (GPIO4) off, even on failure, so the
     caller can go straight to sleep.
     """
     global mqtt_client
-    power.value(1)
     try:
+        power_sensors()
         print("cycle: connecting MQTT")
         mqtt_client = connect_mqtt()
         print("cycle: listening for control")

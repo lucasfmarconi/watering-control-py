@@ -35,6 +35,7 @@ cp config.example.py config.py
 | `TZ_OFFSET` | Hours from UTC (display only) |
 | `PUBLISH_INTERVAL_S` | Seconds of deep sleep between cycles |
 | `ADC_SAMPLES`, `ADC_SAMPLE_DELAY_MS` | Readings per ADC value (10-20, default 15) and pause between them (default 5 ms). The median is used. |
+| `SENSOR_SETTLE_MS` | Minimum wait after powering the sensors before ADC reads (default 300). The DHT11 waits 1 s and retries up to 3 times. |
 | `DEEP_SLEEP` | `True` (default) to deep-sleep between cycles; `False` keeps the board reachable while developing |
 
 > TLS: the broker certificate is verified against `emqxsl-ca.der` (DigiCert Global Root G2, the EMQX Cloud CA). Verification needs correct time, so NTP in `boot.py` must succeed. Regenerate the DER with `openssl x509 -in emqxsl-ca.crt -outform der -out emqxsl-ca.der`.
@@ -74,7 +75,7 @@ Control messages should be published **retained**. The board sleeps between cycl
 
 ## Power saving
 
-Each cycle: power the sensors, connect Wi-Fi/NTP (`boot.py`) and MQTT, apply control messages, publish, then cut sensor power and deep-sleep. The BH1750 is read in one-time mode. Soil and battery are each the median of `ADC_SAMPLES` readings (about 75 ms each).
+Each cycle: power the sensors (the wait for them to settle overlaps the Wi-Fi/MQTT connect), connect Wi-Fi/NTP (`boot.py`) and MQTT, apply control messages, publish, then cut sensor power and deep-sleep. The BH1750 is read in one-time mode. Soil and battery are each the median of `ADC_SAMPLES` readings (about 75 ms each).
 
 With `DEEP_SLEEP = True` the board resets on every wake and its USB serial drops while asleep, so `ampy` only works during the awake window. Set `DEEP_SLEEP = False` in `config.py` while developing.
 
