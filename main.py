@@ -41,6 +41,7 @@ ADC_MAX_SPREAD = getattr(config, "ADC_MAX_SPREAD", 250)  # largest max-min of th
 # flags the readings taken inside this band
 SALT_MOISTURE_MIN = getattr(config, "SALT_MOISTURE_MIN", 55)
 SALT_MOISTURE_MAX = getattr(config, "SALT_MOISTURE_MAX", 75)
+PUBLISH_DIAGNOSTICS = getattr(config, "PUBLISH_DIAGNOSTICS", False)  # also publish soil/raw-spread
 DEEP_SLEEP = getattr(config, "DEEP_SLEEP", True)  # set False in config.py while developing
 
 # Soil calibration (raw 12-bit ADC), set in config.py; see config.example.py for how
@@ -367,6 +368,8 @@ def publish_readings():
     wait_since_power(SENSOR_SETTLE_MS)
     pct, raw, spread, soil_err = read_soil()
     send("soil/raw", str(raw))  # also when invalid, to help diagnose and recalibrate
+    if PUBLISH_DIAGNOSTICS:
+        send("soil/raw-spread", str(spread))
     if soil_err is None:
         send("soil/moisture", str(pct))
     else:

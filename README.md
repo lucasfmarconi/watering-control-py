@@ -39,6 +39,7 @@ cp config.example.py config.py
 | `ADC_MAX_SPREAD` | Largest max-min of the soil samples still trusted (default 250, an untuned guess; check the serial `spread` values) |
 | `SOIL_RAW_DRY`, `SOIL_RAW_WET` | Soil calibration points (raw ADC): the 0% and 100% readings. See `config.example.py` for how to measure them. Defaults 2800 / 1200 are placeholders. |
 | `SALT_MOISTURE_MIN`, `SALT_MOISTURE_MAX` | Soil moisture band (percent, default 55-75) in which `salt/valid` is `true` |
+| `PUBLISH_DIAGNOSTICS` | `True` also publishes `soil/raw-spread` (default `False`) |
 | `DEEP_SLEEP` | `True` (default) to deep-sleep between cycles; `False` keeps the board reachable while developing |
 
 > TLS: the broker certificate is verified against `emqxsl-ca.der` (DigiCert Global Root G2, the EMQX Cloud CA). Verification needs correct time, so NTP in `boot.py` must succeed. Regenerate the DER with `openssl x509 -in emqxsl-ca.crt -outform der -out emqxsl-ca.der`.
@@ -65,6 +66,7 @@ Published (`<base>/...`):
 | `dht/temperature`, `dht/humidity`, `dht/data-timestamp` | DHT11; timestamp is ISO-8601 UTC |
 | `soil/moisture`, `soil/data-timestamp` | percent; `soil/moisture` is skipped when the reading is invalid |
 | `soil/raw` | median raw 12-bit ADC value, published every cycle (even when the reading is invalid) for recalibration |
+| `soil/raw-spread` | max-min of the soil samples; only when `PUBLISH_DIAGNOSTICS = True` |
 | `soil/error` | short reason instead of `soil/moisture` when the reading is invalid: `rail-low` (raw < 50), `rail-high` (raw > 4040), `noisy` (spread above `ADC_MAX_SPREAD`), `bad-calibration` (dry == wet) |
 | `salt/raw` | median raw ADC value of the salt electrodes (GPIO34). Relative and uncalibrated, not a unit; see [Salt reading](#salt-reading) |
 | `salt/valid` | `true` / `false`: `true` only when the soil moisture percent is inside the `SALT_MOISTURE_*` band (always `false` if the soil reading was invalid). Chart only the valid `salt/raw` readings |

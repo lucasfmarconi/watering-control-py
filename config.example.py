@@ -38,3 +38,5 @@ SOIL_RAW_WET = 1200  # raw value after a deep watering, once drained (100%)
 # "true" only while the soil moisture percent is inside this band; chart only those.
 SALT_MOISTURE_MIN = 55
 SALT_MOISTURE_MAX = 75
+
+PUBLISH_DIAGNOSTICS = False  # True also publishes soil/raw-spread (max-min of the samples), to judge probe placement and noise
