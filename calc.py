@@ -19,3 +19,40 @@ def median(values):
 def spread(values):
     """Return max - min of a non-empty sequence, a cheap measure of noise."""
     return max(values) - min(values)
+
+
+SOIL_RAW_MIN = 50  # at or below this the probe is likely shorted/unplugged (ADC rail)
+SOIL_RAW_MAX = 4040  # at or above this the probe is likely disconnected (ADC rail)
+
+
+def soil_error(raw, spread, max_spread):
+    """Return why a soil reading is untrustworthy, or None if it looks valid.
+
+    Args:
+        raw: Median raw 12-bit ADC value.
+        spread: max - min of the samples behind that median.
+        max_spread: Largest spread still considered stable.
+
+    Returns:
+        "rail-low", "rail-high" or "noisy", or None.
+    """
+    if raw < SOIL_RAW_MIN:
+        return "rail-low"
+    if raw > SOIL_RAW_MAX:
+        return "rail-high"
+    if spread > max_spread:
+        return "noisy"
+    return None
+
+
+def raw_to_percent(raw, dry, wet):
+    """Map a raw capacitive-probe value to a 0-100 moisture percentage.
+
+    The probe reads a higher value when dry, so the mapping is inverted:
+    raw == dry gives 0 and raw == wet gives 100. Values outside that range are
+    clamped. Returns None if dry == wet, since the scale is undefined.
+    """
+    if dry == wet:
+        return None
+    pct = (dry - raw) * 100 / (dry - wet)
+    return max(0, min(100, round(pct)))

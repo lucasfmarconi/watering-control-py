@@ -20,3 +20,4 @@ DEEP_SLEEP = True  # set False while developing so ampy/REPL stay reachable
 ADC_SAMPLES = 15  # readings per ADC sample, median taken (allowed 10-20)
 ADC_SAMPLE_DELAY_MS = 5  # pause between those readings
 SENSOR_SETTLE_MS = 300  # wait after powering the sensors (GPIO4) before reading the ADCs
+ADC_MAX_SPREAD = 250  # soil readings whose samples differ by more than this (max-min) are rejected as noisy

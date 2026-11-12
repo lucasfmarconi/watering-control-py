@@ -28,5 +28,33 @@ class SpreadTest(unittest.TestCase):
         self.assertEqual(calc.spread([10, 40, 25]), 30)
 
 
+class SoilErrorTest(unittest.TestCase):
+    def test_valid(self):
+        self.assertIsNone(calc.soil_error(2000, 30, 250))
+
+    def test_rails(self):
+        self.assertEqual(calc.soil_error(10, 0, 250), "rail-low")
+        self.assertEqual(calc.soil_error(4095, 0, 250), "rail-high")
+
+    def test_noisy(self):
+        self.assertEqual(calc.soil_error(2000, 400, 250), "noisy")
+
+
+class RawToPercentTest(unittest.TestCase):
+    def test_endpoints(self):
+        self.assertEqual(calc.raw_to_percent(2800, 2800, 1200), 0)
+        self.assertEqual(calc.raw_to_percent(1200, 2800, 1200), 100)
+
+    def test_midpoint(self):
+        self.assertEqual(calc.raw_to_percent(2000, 2800, 1200), 50)
+
+    def test_clamps(self):
+        self.assertEqual(calc.raw_to_percent(3500, 2800, 1200), 0)
+        self.assertEqual(calc.raw_to_percent(500, 2800, 1200), 100)
+
+    def test_equal_points_return_none(self):
+        self.assertIsNone(calc.raw_to_percent(2000, 2000, 2000))
+
+
 if __name__ == "__main__":
     unittest.main()

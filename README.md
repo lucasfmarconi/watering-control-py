@@ -36,6 +36,7 @@ cp config.example.py config.py
 | `PUBLISH_INTERVAL_S` | Seconds of deep sleep between cycles |
 | `ADC_SAMPLES`, `ADC_SAMPLE_DELAY_MS` | Readings per ADC value (10-20, default 15) and pause between them (default 5 ms). The median is used. |
 | `SENSOR_SETTLE_MS` | Minimum wait after powering the sensors before ADC reads (default 300). The DHT11 waits 1 s and retries up to 3 times. |
+| `ADC_MAX_SPREAD` | Largest max-min of the soil samples still trusted (default 250, an untuned guess; check the serial `spread` values) |
 | `DEEP_SLEEP` | `True` (default) to deep-sleep between cycles; `False` keeps the board reachable while developing |
 
 > TLS: the broker certificate is verified against `emqxsl-ca.der` (DigiCert Global Root G2, the EMQX Cloud CA). Verification needs correct time, so NTP in `boot.py` must succeed. Regenerate the DER with `openssl x509 -in emqxsl-ca.crt -outform der -out emqxsl-ca.der`.
@@ -60,7 +61,8 @@ Published (`<base>/...`):
 |---|---|
 | `status` | retained: `online` while awake, `sleeping` before deep sleep, `offline` (last will) after an unclean drop |
 | `dht/temperature`, `dht/humidity`, `dht/data-timestamp` | DHT11; timestamp is ISO-8601 UTC |
-| `soil/moisture`, `soil/data-timestamp` | percent |
+| `soil/moisture`, `soil/data-timestamp` | percent; `soil/moisture` is skipped when the reading is invalid |
+| `soil/error` | short reason instead of `soil/moisture` when the reading is invalid: `rail-low` (raw < 50), `rail-high` (raw > 4040), `noisy` (spread above `ADC_MAX_SPREAD`), `bad-calibration` (dry == wet) |
 | `battery/voltage` | volts |
 | `light/lux` | BH1750 |
 

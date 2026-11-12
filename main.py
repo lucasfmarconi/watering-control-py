@@ -34,10 +34,11 @@ SENSOR_SETTLE_MS = getattr(config, "SENSOR_SETTLE_MS", 300)  # after GPIO4 goes 
 DHT_SETTLE_MS = 1000  # DHT11 needs ~1 s after power-up
 DHT_RETRY_MS = 1000  # and at most one read per second
 DHT_ATTEMPTS = 3
+ADC_MAX_SPREAD = getattr(config, "ADC_MAX_SPREAD", 250)  # largest max-min of the samples still trusted
 DEEP_SLEEP = getattr(config, "DEEP_SLEEP", True)  # set False in config.py while developing
 
 # Soil sensor calibration (raw 12-bit ADC). Placeholder values: measure your own
-# sensor (see read_soil_pct) and replace them.
+# sensor (see read_soil) and replace them.
 SOIL_DRY_RAW = 2800  # sensor held in dry air
 SOIL_WET_RAW = 1200  # sensor submerged in water up to the marked line
 # endregion
@@ -143,26 +144,35 @@ def read_dht():
     return None
 
 
-def read_soil_pct():
-    """Return soil moisture as an integer percentage, 0 (dry) to 100 (wet).
+def read_soil():
+    """Read the soil probe and return (pct, raw, spread, error).
 
     Capacitive sensors output a higher voltage (higher ADC value) when dry and a
     lower one when wet, so the reading is inverted and linearly mapped between
-    two calibration points:
+    two calibration points (see calc.raw_to_percent):
 
         pct = (SOIL_DRY_RAW - raw) * 100 / (SOIL_DRY_RAW - SOIL_WET_RAW)
 
-    The result is clamped to 0-100, since readings can fall outside the
-    calibrated range.
+    The reading is checked before it is converted (calc.soil_error): a value at
+    the ADC rails or a large spread means the probe is unplugged, shorted or
+    noisy. In that case pct is None and error says why, so a disconnected probe
+    never looks like "0%, needs watering". Only valid readings are clamped to
+    0-100.
 
     Calibration: print the median raw reading with the sensor in dry air and set
     SOIL_DRY_RAW; then submerge it in water (up to the marked line) and set
     SOIL_WET_RAW. Using the full 0-4095 range instead would never reach 0% or
     100%, because real sensors only span part of the ADC range.
     """
-    raw = read_adc_median(soil_adc)[0]
-    pct = (SOIL_DRY_RAW - raw) * 100 / (SOIL_DRY_RAW - SOIL_WET_RAW)
-    return max(0, min(100, round(pct)))
+    raw, spread = read_adc_median(soil_adc)
+    print("soil raw:", raw, "spread:", spread)
+    error = calc.soil_error(raw, spread, ADC_MAX_SPREAD)
+    if error is not None:
+        return None, raw, spread, error
+    pct = calc.raw_to_percent(raw, SOIL_DRY_RAW, SOIL_WET_RAW)
+    if pct is None:
+        return None, raw, spread, "bad-calibration"
+    return pct, raw, spread, None
 
 
 def read_battery_v():
@@ -298,7 +308,11 @@ def publish_readings():
         send("dht/humidity", str(dht_reading[1]))
         send("dht/data-timestamp", ts)
     wait_since_power(SENSOR_SETTLE_MS)
-    send("soil/moisture", str(read_soil_pct()))
+    pct, raw, spread, soil_err = read_soil()
+    if soil_err is None:
+        send("soil/moisture", str(pct))
+    else:
+        send("soil/error", soil_err)
     send("soil/data-timestamp", ts)
     send("battery/voltage", str(read_battery_v()))
     lux = read_lux()
