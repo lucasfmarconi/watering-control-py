@@ -56,5 +56,19 @@ class RawToPercentTest(unittest.TestCase):
         self.assertIsNone(calc.raw_to_percent(2000, 2000, 2000))
 
 
+class SaltValidTest(unittest.TestCase):
+    def test_inside_band(self):
+        self.assertTrue(calc.salt_valid(60, 55, 75))
+        self.assertTrue(calc.salt_valid(55, 55, 75))
+        self.assertTrue(calc.salt_valid(75, 55, 75))
+
+    def test_outside_band(self):
+        self.assertFalse(calc.salt_valid(54, 55, 75))
+        self.assertFalse(calc.salt_valid(76, 55, 75))
+
+    def test_invalid_soil_reading(self):
+        self.assertFalse(calc.salt_valid(None, 55, 75))
+
+
 if __name__ == "__main__":
     unittest.main()

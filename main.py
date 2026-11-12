@@ -35,6 +35,10 @@ DHT_SETTLE_MS = 1000  # DHT11 needs ~1 s after power-up
 DHT_RETRY_MS = 1000  # and at most one read per second
 DHT_ATTEMPTS = 3
 ADC_MAX_SPREAD = getattr(config, "ADC_MAX_SPREAD", 250)  # largest max-min of the samples still trusted
+# salt/raw is only comparable between readings at similar soil moisture, so salt/valid
+# flags the readings taken inside this band
+SALT_MOISTURE_MIN = getattr(config, "SALT_MOISTURE_MIN", 55)
+SALT_MOISTURE_MAX = getattr(config, "SALT_MOISTURE_MAX", 75)
 DEEP_SLEEP = getattr(config, "DEEP_SLEEP", True)  # set False in config.py while developing
 
 # Soil calibration (raw 12-bit ADC), set in config.py; see config.example.py for how
@@ -318,6 +322,7 @@ def publish_readings():
     salt_raw = read_adc_median(salt_adc)[0]
     print("salt raw:", salt_raw)
     send("salt/raw", str(salt_raw))
+    send("salt/valid", "true" if calc.salt_valid(pct, SALT_MOISTURE_MIN, SALT_MOISTURE_MAX) else "false")
     send("battery/voltage", str(read_battery_v()))
     lux = read_lux()
     if lux is not None:

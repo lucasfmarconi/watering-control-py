@@ -33,3 +33,8 @@ ADC_MAX_SPREAD = 250  # soil readings whose samples differ by more than this (ma
 # Values near the ends of the ADC range (below ~100 or above ~3900) are less reliable.
 SOIL_RAW_DRY = 2800  # raw value when the plant needs water (0%)
 SOIL_RAW_WET = 1200  # raw value after a deep watering, once drained (100%)
+
+# salt/raw is only comparable between readings at similar soil moisture. salt/valid is
+# "true" only while the soil moisture percent is inside this band; chart only those.
+SALT_MOISTURE_MIN = 55
+SALT_MOISTURE_MAX = 75

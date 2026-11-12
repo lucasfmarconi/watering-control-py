@@ -56,3 +56,11 @@ def raw_to_percent(raw, dry, wet):
         return None
     pct = (dry - raw) * 100 / (dry - wet)
     return max(0, min(100, round(pct)))
+
+
+def salt_valid(moisture_pct, low, high):
+    """Return True if the soil moisture is inside [low, high] and so the salt reading is comparable.
+
+    moisture_pct is None when the soil reading was invalid, which is never valid.
+    """
+    return moisture_pct is not None and low <= moisture_pct <= high
