@@ -37,10 +37,10 @@ DHT_ATTEMPTS = 3
 ADC_MAX_SPREAD = getattr(config, "ADC_MAX_SPREAD", 250)  # largest max-min of the samples still trusted
 DEEP_SLEEP = getattr(config, "DEEP_SLEEP", True)  # set False in config.py while developing
 
-# Soil sensor calibration (raw 12-bit ADC). Placeholder values: measure your own
-# sensor (see read_soil) and replace them.
-SOIL_DRY_RAW = 2800  # sensor held in dry air
-SOIL_WET_RAW = 1200  # sensor submerged in water up to the marked line
+# Soil calibration (raw 12-bit ADC), set in config.py; see config.example.py for how
+# to measure them. The defaults are placeholders for a typical capacitive probe.
+SOIL_RAW_DRY = getattr(config, "SOIL_RAW_DRY", 2800)  # the "0%" point
+SOIL_RAW_WET = getattr(config, "SOIL_RAW_WET", 1200)  # the "100%" point
 # endregion
 
 # region init
@@ -151,7 +151,7 @@ def read_soil():
     lower one when wet, so the reading is inverted and linearly mapped between
     two calibration points (see calc.raw_to_percent):
 
-        pct = (SOIL_DRY_RAW - raw) * 100 / (SOIL_DRY_RAW - SOIL_WET_RAW)
+        pct = (SOIL_RAW_DRY - raw) * 100 / (SOIL_RAW_DRY - SOIL_RAW_WET)
 
     The reading is checked before it is converted (calc.soil_error): a value at
     the ADC rails or a large spread means the probe is unplugged, shorted or
@@ -159,17 +159,17 @@ def read_soil():
     never looks like "0%, needs watering". Only valid readings are clamped to
     0-100.
 
-    Calibration: print the median raw reading with the sensor in dry air and set
-    SOIL_DRY_RAW; then submerge it in water (up to the marked line) and set
-    SOIL_WET_RAW. Using the full 0-4095 range instead would never reach 0% or
-    100%, because real sensors only span part of the ADC range.
+    Calibration lives in config.py (SOIL_RAW_DRY / SOIL_RAW_WET); read the
+    values from the soil/raw topic. Using the full 0-4095 range instead would
+    never reach 0% or 100%, because real sensors only span part of the ADC
+    range.
     """
     raw, spread = read_adc_median(soil_adc)
     print("soil raw:", raw, "spread:", spread)
     error = calc.soil_error(raw, spread, ADC_MAX_SPREAD)
     if error is not None:
         return None, raw, spread, error
-    pct = calc.raw_to_percent(raw, SOIL_DRY_RAW, SOIL_WET_RAW)
+    pct = calc.raw_to_percent(raw, SOIL_RAW_DRY, SOIL_RAW_WET)
     if pct is None:
         return None, raw, spread, "bad-calibration"
     return pct, raw, spread, None

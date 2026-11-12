@@ -37,6 +37,7 @@ cp config.example.py config.py
 | `ADC_SAMPLES`, `ADC_SAMPLE_DELAY_MS` | Readings per ADC value (10-20, default 15) and pause between them (default 5 ms). The median is used. |
 | `SENSOR_SETTLE_MS` | Minimum wait after powering the sensors before ADC reads (default 300). The DHT11 waits 1 s and retries up to 3 times. |
 | `ADC_MAX_SPREAD` | Largest max-min of the soil samples still trusted (default 250, an untuned guess; check the serial `spread` values) |
+| `SOIL_RAW_DRY`, `SOIL_RAW_WET` | Soil calibration points (raw ADC): the 0% and 100% readings. See `config.example.py` for how to measure them. Defaults 2800 / 1200 are placeholders. |
 | `DEEP_SLEEP` | `True` (default) to deep-sleep between cycles; `False` keeps the board reachable while developing |
 
 > TLS: the broker certificate is verified against `emqxsl-ca.der` (DigiCert Global Root G2, the EMQX Cloud CA). Verification needs correct time, so NTP in `boot.py` must succeed. Regenerate the DER with `openssl x509 -in emqxsl-ca.crt -outform der -out emqxsl-ca.der`.
