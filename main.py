@@ -1,9 +1,10 @@
-import json
-import machine
-import dht
 import ssl
 import time
+
+import machine
+import dht
 from umqtt.simple import MQTTClient
+
 import config
 
 # region constants
@@ -18,6 +19,8 @@ PIN_I2C_SDA = 25
 PIN_I2C_SCL = 26
 BH1750_ADDR = 0x23
 CA_FILE = "emqxsl-ca.der"  # DigiCert Global Root G2, DER
+ADC_MAX = 4095  # 12-bit ADC full scale
+MS_PER_S = 1000
 
 # Soil sensor calibration (raw 12-bit ADC). Placeholder values: measure your own
 # sensor (see read_soil_pct) and replace them.
@@ -41,14 +44,14 @@ bat_adc.atten(machine.ADC.ATTN_11DB)
 # region sensors
 try:
     dht_sensor = dht.DHT11(machine.Pin(PIN_DHT))
-except Exception as e:
+except (OSError, ValueError) as e:
     print("DHT init failed:", e)
     dht_sensor = None
 
 try:
     i2c = machine.I2C(0, sda=machine.Pin(PIN_I2C_SDA), scl=machine.Pin(PIN_I2C_SCL))
     i2c.writeto(BH1750_ADDR, b"\x10")  # continuous high-res mode
-except Exception as e:
+except (OSError, ValueError) as e:
     print("BH1750 init failed:", e)
     i2c = None
 
@@ -70,7 +73,6 @@ def read_soil_pct():
     SOIL_WET_RAW. Using the full 0-4095 range instead would never reach 0% or
     100%, because real sensors only span part of the ADC range.
     """
-
     raw = soil_adc.read()
     pct = (SOIL_DRY_RAW - raw) * 100 / (SOIL_DRY_RAW - SOIL_WET_RAW)
     return max(0, min(100, round(pct)))
@@ -91,11 +93,15 @@ def read_battery_v():
       linear at ATTN_11DB and does not match the nominal 3.3 V full scale.
       Compare against a multimeter and adjust it if the reading is off.
     """
-
-    return round(bat_adc.read() / 4095 * 6.6 * 1.1, 2)
+    return round(bat_adc.read() / ADC_MAX * 6.6 * 1.1, 2)
 
 
 def read_lux():
+    """Return ambient light in lux, or None if the BH1750 is missing or fails.
+
+    The sensor returns a 16-bit big-endian count in continuous high-resolution
+    mode; dividing by 1.2 converts it to lux (per the BH1750 datasheet).
+    """
     if i2c is None:
         return None
     try:
@@ -103,6 +109,8 @@ def read_lux():
         return round(((raw[0] << 8) | raw[1]) / 1.2, 1)
     except OSError:
         return None
+
+
 # endregion
 
 # region mqtt
@@ -110,56 +118,86 @@ mqtt_client = None
 
 
 def iso_utc():
-    t = time.gmtime()
-    return "%04d-%02d-%02dT%02d:%02d:%02dZ" % t[:6]
+    """Return the current UTC time as an ISO 8601 string (YYYY-MM-DDTHH:MM:SSZ).
+
+    Only meaningful once the clock has been synced over NTP (see boot.py).
+    """
+    now = time.gmtime()
+    return "%04d-%02d-%02dT%02d:%02d:%02dZ" % now[:6]
 
 
 def topic(suffix):
+    """Return the full MQTT topic for suffix, under config.MQTT_TOPIC_BASE."""
     return "%s/%s" % (config.MQTT_TOPIC_BASE, suffix)
 
 
 def pump_set(on):
+    """Switch the pump on or off and track when it was turned on.
+
+    pump_on_since feeds the max-on-time safety cutoff in the main loop.
+    """
     global pump_on_since
     pump.value(1 if on else 0)
     pump_on_since = time.ticks_ms() if on else None
     print("pump", "on" if on else "off")
 
 
-def on_message(t, msg):
-    t = t.decode()
+def on_message(topic_bytes, msg):
+    """Handle an incoming MQTT control message.
+
+    The command is the part of the topic after "/control/":
+
+    - pump: "on" turns the pump on, anything else turns it off.
+    - interval: new publish interval in seconds.
+    - pump-max-on: new pump safety cutoff in seconds.
+
+    Args:
+        topic_bytes: Topic the message arrived on, as bytes.
+        msg: Message payload, as bytes.
+    """
+    global publish_interval_s, pump_max_on_s
+    cmd = topic_bytes.decode().split("/control/", 1)[-1]
     msg = msg.decode().strip()
-    cmd = t.split("/control/", 1)[-1]
     if cmd == "pump":
         pump_set(msg == "on")
     elif cmd == "interval":
-        global publish_interval_s
         publish_interval_s = int(msg)
         print("publish interval:", publish_interval_s)
     elif cmd == "pump-max-on":
-        global pump_max_on_s
         pump_max_on_s = int(msg)
         print("pump max on:", pump_max_on_s)
 
 
 def connect_mqtt():
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    with open(CA_FILE, "rb") as f:
-        ctx.load_verify_locations(cadata=f.read())
-    ctx.verify_mode = ssl.CERT_REQUIRED  # needs NTP time (see boot.py)
-    c = MQTTClient(
-        config.MQTT_CLIENT_ID, config.MQTT_BROKER, port=config.MQTT_PORT,
-        user=config.MQTT_USER, password=config.MQTT_PASSWORD,
-        ssl=ctx, keepalive=60,
+    """Connect to the MQTT broker over TLS and return the client.
+
+    Verifies the broker certificate against CA_FILE (this needs the clock to be
+    set, see boot.py), registers an offline last-will on the status topic,
+    announces "online" (both retained), and subscribes to the control topics.
+    """
+    ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    with open(CA_FILE, "rb") as ca_file:
+        ssl_ctx.load_verify_locations(cadata=ca_file.read())
+    ssl_ctx.verify_mode = ssl.CERT_REQUIRED  # needs NTP time (see boot.py)
+    client = MQTTClient(
+        config.MQTT_CLIENT_ID,
+        config.MQTT_BROKER,
+        port=config.MQTT_PORT,
+        user=config.MQTT_USER,
+        password=config.MQTT_PASSWORD,
+        ssl=ssl_ctx,
+        keepalive=60,
     )
-    c.set_last_will(topic("status"), b"offline", retain=True)
-    c.set_callback(on_message)
-    c.connect()
-    c.publish(topic("status"), b"online", retain=True)
-    c.subscribe(config.MQTT_TOPIC_DEVICES_SUB)
-    return c
+    client.set_last_will(topic("status"), b"offline", retain=True)
+    client.set_callback(on_message)
+    client.connect()
+    client.publish(topic("status"), b"online", retain=True)
+    client.subscribe(config.MQTT_TOPIC_DEVICES_SUB)
+    return client
 
 
 def publish_readings():
+    """Read all sensors and publish them, skipping any that are unavailable."""
     ts = iso_utc()
     if dht_sensor is not None:
         try:
@@ -175,10 +213,17 @@ def publish_readings():
     lux = read_lux()
     if lux is not None:
         mqtt_client.publish(topic("light/lux"), str(lux))
+
+
 # endregion
 
 
 def recover():
+    """Mark the device offline, disconnect, and reset the board.
+
+    Errors while disconnecting are ignored: the connection is usually already
+    broken, and the reset follows regardless.
+    """
     try:
         mqtt_client.publish(topic("status"), b"offline", retain=True)
         mqtt_client.disconnect()
@@ -193,15 +238,15 @@ except OSError as e:
     print("MQTT connect failed:", e)
     recover()
 
-last_publish = time.ticks_add(time.ticks_ms(), -publish_interval_s * 1000)
+last_publish = time.ticks_add(time.ticks_ms(), -publish_interval_s * MS_PER_S)
 while True:
     try:
         mqtt_client.check_msg()
         now = time.ticks_ms()
-        if time.ticks_diff(now, last_publish) >= publish_interval_s * 1000:
+        if time.ticks_diff(now, last_publish) >= publish_interval_s * MS_PER_S:
             publish_readings()
             last_publish = now
-        if pump_on_since is not None and time.ticks_diff(now, pump_on_since) >= pump_max_on_s * 1000:
+        if pump_on_since is not None and time.ticks_diff(now, pump_on_since) >= pump_max_on_s * MS_PER_S:
             pump_set(False)
             mqtt_client.publish(topic("pump/state"), b"off")
     except OSError as e:
