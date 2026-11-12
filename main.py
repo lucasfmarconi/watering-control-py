@@ -17,6 +17,7 @@ PIN_PUMP = 19  # motor drive (only when no LoRa shield)
 PIN_I2C_SDA = 25
 PIN_I2C_SCL = 26
 BH1750_ADDR = 0x23
+CA_FILE = "emqxsl-ca.der"  # DigiCert Global Root G2, DER
 # endregion
 
 # region init
@@ -103,7 +104,9 @@ def on_message(t, msg):
 
 def connect_mqtt():
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.verify_mode = ssl.CERT_NONE  # broker cert NOT verified
+    with open(CA_FILE, "rb") as f:
+        ctx.load_verify_locations(cadata=f.read())
+    ctx.verify_mode = ssl.CERT_REQUIRED  # needs NTP time (see boot.py)
     c = MQTTClient(
         config.MQTT_CLIENT_ID, config.MQTT_BROKER, port=config.MQTT_PORT,
         user=config.MQTT_USER, password=config.MQTT_PASSWORD,

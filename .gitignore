@@ -221,3 +221,5 @@ __marimo__/
 
 # Project
 config.py
+emqxsl-ca.crt
+emqxsl-ca.der

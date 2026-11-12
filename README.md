@@ -35,7 +35,7 @@ cp config.example.py config.py
 | `PUBLISH_INTERVAL_S` | Seconds between publishes |
 | `PUMP_MAX_ON_S` | Safety cutoff for the pump |
 
-> TLS note: `main.py` sets `verify_mode = ssl.CERT_NONE`, so the broker certificate is **not verified**. Load a CA for production.
+> TLS: the broker certificate is verified against `emqxsl-ca.der` (DigiCert Global Root G2, the EMQX Cloud CA). Verification needs correct time, so NTP in `boot.py` must succeed. Regenerate the DER with `openssl x509 -in emqxsl-ca.crt -outform der -out emqxsl-ca.der`.
 
 ## Usage
 
