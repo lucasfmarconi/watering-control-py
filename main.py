@@ -2,6 +2,7 @@ import ssl
 import time
 
 import machine
+import network
 import dht
 from umqtt.simple import MQTTClient
 
@@ -14,7 +15,6 @@ PIN_SOIL = 32
 PIN_SALT = 34
 PIN_BAT = 33
 PIN_POWER_CTRL = 4  # powers the sensors
-PIN_PUMP = 19  # motor drive (only when no LoRa shield)
 PIN_I2C_SDA = 25
 PIN_I2C_SCL = 26
 BH1750_ADDR = 0x23
@@ -35,12 +35,9 @@ SOIL_WET_RAW = 1200  # sensor submerged in water up to the marked line
 
 # region init
 publish_interval_s = config.PUBLISH_INTERVAL_S
-pump_max_on_s = config.PUMP_MAX_ON_S
 control_listen_s = CONTROL_LISTEN_S
-pump_on_since = None
 
 power = machine.Pin(PIN_POWER_CTRL, machine.Pin.OUT, value=0)  # on only during a cycle
-pump = machine.Pin(PIN_PUMP, machine.Pin.OUT, value=0)
 soil_adc = machine.ADC(machine.Pin(PIN_SOIL))
 soil_adc.atten(machine.ADC.ATTN_11DB)
 bat_adc = machine.ADC(machine.Pin(PIN_BAT))
@@ -115,7 +112,8 @@ def read_lux():
         time.sleep_ms(BH1750_MEASURE_MS)
         raw = i2c.readfrom(BH1750_ADDR, 2)
         return round(((raw[0] << 8) | raw[1]) / 1.2, 1)
-    except OSError:
+    except OSError as e:
+        print("BH1750 read failed:", e)
         return None
 
 
@@ -139,25 +137,12 @@ def topic(suffix):
     return "%s/%s" % (config.MQTT_TOPIC_BASE, suffix)
 
 
-def pump_set(on):
-    """Switch the pump on or off and track when it was turned on.
-
-    pump_on_since feeds the max-on-time safety cutoff in the main loop.
-    """
-    global pump_on_since
-    pump.value(1 if on else 0)
-    pump_on_since = time.ticks_ms() if on else None
-    print("pump", "on" if on else "off")
-
-
 def on_message(topic_bytes, msg):
     """Handle an incoming MQTT control message.
 
     The command is the part of the topic after "/control/":
 
-    - pump: "on" turns the pump on, anything else turns it off.
     - interval: new sleep time between cycles in seconds (at least MIN_INTERVAL_S).
-    - pump-max-on: new pump safety cutoff in seconds.
     - listen: new control listen window in seconds (at least MIN_LISTEN_S).
 
     Invalid numbers are ignored. Control messages should be published retained,
@@ -167,18 +152,13 @@ def on_message(topic_bytes, msg):
         topic_bytes: Topic the message arrived on, as bytes.
         msg: Message payload, as bytes.
     """
-    global publish_interval_s, pump_max_on_s, control_listen_s
+    global publish_interval_s, control_listen_s
     cmd = topic_bytes.decode().split("/control/", 1)[-1]
     msg = msg.decode().strip()
     try:
-        if cmd == "pump":
-            pump_set(msg == "on")
-        elif cmd == "interval":
+        if cmd == "interval":
             publish_interval_s = max(MIN_INTERVAL_S, int(msg))
             print("publish interval:", publish_interval_s)
-        elif cmd == "pump-max-on":
-            pump_max_on_s = int(msg)
-            print("pump max on:", pump_max_on_s)
         elif cmd == "listen":
             control_listen_s = max(MIN_LISTEN_S, int(msg))
             print("control listen:", control_listen_s)
@@ -214,23 +194,32 @@ def connect_mqtt():
     return client
 
 
+def send(suffix, payload, retain=False):
+    """Publish payload under suffix with QoS 1, waiting for the broker's ack.
+
+    The board powers the radio down right after publishing, so QoS 0 messages
+    could still be in flight and get lost.
+    """
+    mqtt_client.publish(topic(suffix), payload, retain, 1)
+
+
 def publish_readings():
     """Read all sensors and publish them, skipping any that are unavailable."""
     ts = iso_utc()
     if dht_sensor is not None:
         try:
             dht_sensor.measure()
-            mqtt_client.publish(topic("dht/temperature"), str(dht_sensor.temperature()))
-            mqtt_client.publish(topic("dht/humidity"), str(dht_sensor.humidity()))
-            mqtt_client.publish(topic("dht/data-timestamp"), ts)
+            send("dht/temperature", str(dht_sensor.temperature()))
+            send("dht/humidity", str(dht_sensor.humidity()))
+            send("dht/data-timestamp", ts)
         except OSError as e:
             print("DHT read failed:", e)
-    mqtt_client.publish(topic("soil/moisture"), str(read_soil_pct()))
-    mqtt_client.publish(topic("soil/data-timestamp"), ts)
-    mqtt_client.publish(topic("battery/voltage"), str(read_battery_v()))
+    send("soil/moisture", str(read_soil_pct()))
+    send("soil/data-timestamp", ts)
+    send("battery/voltage", str(read_battery_v()))
     lux = read_lux()
     if lux is not None:
-        mqtt_client.publish(topic("light/lux"), str(lux))
+        send("light/lux", str(lux))
 
 
 # endregion
@@ -250,20 +239,18 @@ def listen_for_control():
         time.sleep_ms(50)
 
 
-def wait_for_pump():
-    """Stay awake while the pump runs, enforcing the pump_max_on_s cutoff."""
-    while pump_on_since is not None:
-        mqtt_client.check_msg()
-        if time.ticks_diff(time.ticks_ms(), pump_on_since) >= pump_max_on_s * MS_PER_S:
-            pump_set(False)
-            mqtt_client.publish(topic("pump/state"), b"off")
-        time.sleep_ms(100)
+def radio_off():
+    """Disconnect and power down Wi-Fi so deep sleep starts from a clean state."""
+    time.sleep_ms(300)  # let the DISCONNECT packet leave before the radio goes down
+    wlan = network.WLAN(network.STA_IF)
+    wlan.disconnect()
+    wlan.active(False)
 
 
 def run_cycle():
     """Run one awake cycle: connect, apply control messages, publish, disconnect.
 
-    Always leaves the pump and the sensor power off, even on failure, so the
+    Always leaves the sensor power off, even on failure, so the
     caller can go straight to sleep.
     """
     global mqtt_client
@@ -275,20 +262,19 @@ def run_cycle():
         listen_for_control()
         print("cycle: publishing")
         publish_readings()
-        wait_for_pump()
-        mqtt_client.publish(topic("status"), b"sleeping", retain=True)
+        send("status", b"sleeping", retain=True)
         mqtt_client.disconnect()
         print("cycle: done")
     except Exception as e:  # any failure must still end in sleep, not an idle awake board
         print("Cycle failed:", e)
     finally:
-        pump_set(False)
         power.value(0)
 
 
 while True:
     run_cycle()
     if DEEP_SLEEP:
-        print("deep sleep for", publish_interval_s, "s")
+        print("deep sleep for", publish_interval_s, "s at", iso_utc())
+        radio_off()
         machine.deepsleep(publish_interval_s * MS_PER_S)  # wakes through boot.py
     time.sleep(publish_interval_s)

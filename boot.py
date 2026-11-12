@@ -1,7 +1,11 @@
+import machine
 import network
 import ntptime
 import time
 import config
+
+# reset_cause: 1 power-on, 2 hard, 3 WDT, 4 deep sleep, 5 soft
+print("reset cause:", machine.reset_cause())
 
 
 def connect_wifi():
@@ -23,5 +27,6 @@ def connect_wifi():
 if connect_wifi().isconnected():
     try:
         ntptime.settime()
+        print("time:", time.gmtime()[:6])
     except OSError as e:
         print("NTP failed:", e)
