@@ -100,6 +100,19 @@ Reading the trend (valid readings only):
 - After fertilizing, expect a gradual rise that falls again after a thorough watering/flush. Publish a retained `control/fertilized` message when you fertilize so it shows up as `salt/last-fertilized` and you can mark it on the chart.
 - A baseline that keeps rising at the same moisture, week after week, may mean over-fertilizing or salt buildup.
 
+## Manual test checklist
+
+The board cannot be run in CI; the pure helpers in `calc.py` have host tests (`python3 -m unittest discover -s tests`). On the board:
+
+1. Set `DEEP_SLEEP = False` (and optionally `PUBLISH_DIAGNOSTICS = True`), deploy, and watch the serial output for the sampled `soil raw` / `salt raw` values and the `spread`.
+2. Hold the soil probe in air: the raw value should be steady (low spread) and map to about 0%.
+3. Insert it in the drained pot: the percent should be inside the expected range and stable across cycles.
+4. Water the pot: the percent should rise over several minutes and settle.
+5. Disconnect the probe: `soil/error` should appear (`rail-high`/`rail-low`/`noisy`) and no `soil/moisture`, never a fake percent.
+6. Confirm `soil/raw`, `salt/raw`, `salt/valid` and (if enabled) `soil/raw-spread` appear on the broker every cycle.
+7. Publish a retained `control/soil_dry` and check the percent changes on the next cycle and survives a power cycle.
+8. Re-enable `DEEP_SLEEP = True` and confirm GPIO4 is LOW during sleep (sensor LED off / current draw).
+
 ## Pinout (HiGrow)
 
 | Function | GPIO | Notes |
