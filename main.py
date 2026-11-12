@@ -18,9 +18,14 @@ PIN_PUMP = 19  # motor drive (only when no LoRa shield)
 PIN_I2C_SDA = 25
 PIN_I2C_SCL = 26
 BH1750_ADDR = 0x23
+BH1750_MEASURE_MS = 180  # max high-res measurement time
 CA_FILE = "emqxsl-ca.der"  # DigiCert Global Root G2, DER
 ADC_MAX = 4095  # 12-bit ADC full scale
 MS_PER_S = 1000
+CONTROL_LISTEN_S = 3  # default awake window to receive retained control messages
+MIN_LISTEN_S = 1  # lower bound for the "listen" command; 0 would make the board deaf to control
+MIN_INTERVAL_S = 10  # lower bound for the "interval" command (protects the battery)
+DEEP_SLEEP = getattr(config, "DEEP_SLEEP", True)  # set False in config.py while developing
 
 # Soil sensor calibration (raw 12-bit ADC). Placeholder values: measure your own
 # sensor (see read_soil_pct) and replace them.
@@ -31,9 +36,10 @@ SOIL_WET_RAW = 1200  # sensor submerged in water up to the marked line
 # region init
 publish_interval_s = config.PUBLISH_INTERVAL_S
 pump_max_on_s = config.PUMP_MAX_ON_S
+control_listen_s = CONTROL_LISTEN_S
 pump_on_since = None
 
-power = machine.Pin(PIN_POWER_CTRL, machine.Pin.OUT, value=1)
+power = machine.Pin(PIN_POWER_CTRL, machine.Pin.OUT, value=0)  # on only during a cycle
 pump = machine.Pin(PIN_PUMP, machine.Pin.OUT, value=0)
 soil_adc = machine.ADC(machine.Pin(PIN_SOIL))
 soil_adc.atten(machine.ADC.ATTN_11DB)
@@ -50,9 +56,8 @@ except (OSError, ValueError) as e:
 
 try:
     i2c = machine.I2C(0, sda=machine.Pin(PIN_I2C_SDA), scl=machine.Pin(PIN_I2C_SCL))
-    i2c.writeto(BH1750_ADDR, b"\x10")  # continuous high-res mode
 except (OSError, ValueError) as e:
-    print("BH1750 init failed:", e)
+    print("I2C init failed:", e)
     i2c = None
 
 
@@ -99,12 +104,15 @@ def read_battery_v():
 def read_lux():
     """Return ambient light in lux, or None if the BH1750 is missing or fails.
 
-    The sensor returns a 16-bit big-endian count in continuous high-resolution
-    mode; dividing by 1.2 converts it to lux (per the BH1750 datasheet).
+    Uses one-time high-resolution mode, after which the sensor powers itself
+    down. It returns a 16-bit big-endian count; dividing by 1.2 converts it to
+    lux (per the BH1750 datasheet).
     """
     if i2c is None:
         return None
     try:
+        i2c.writeto(BH1750_ADDR, b"\x20")  # one-time high-res measurement
+        time.sleep_ms(BH1750_MEASURE_MS)
         raw = i2c.readfrom(BH1750_ADDR, 2)
         return round(((raw[0] << 8) | raw[1]) / 1.2, 1)
     except OSError:
@@ -148,24 +156,34 @@ def on_message(topic_bytes, msg):
     The command is the part of the topic after "/control/":
 
     - pump: "on" turns the pump on, anything else turns it off.
-    - interval: new publish interval in seconds.
+    - interval: new sleep time between cycles in seconds (at least MIN_INTERVAL_S).
     - pump-max-on: new pump safety cutoff in seconds.
+    - listen: new control listen window in seconds (at least MIN_LISTEN_S).
+
+    Invalid numbers are ignored. Control messages should be published retained,
+    since the device is only listening briefly each cycle.
 
     Args:
         topic_bytes: Topic the message arrived on, as bytes.
         msg: Message payload, as bytes.
     """
-    global publish_interval_s, pump_max_on_s
+    global publish_interval_s, pump_max_on_s, control_listen_s
     cmd = topic_bytes.decode().split("/control/", 1)[-1]
     msg = msg.decode().strip()
-    if cmd == "pump":
-        pump_set(msg == "on")
-    elif cmd == "interval":
-        publish_interval_s = int(msg)
-        print("publish interval:", publish_interval_s)
-    elif cmd == "pump-max-on":
-        pump_max_on_s = int(msg)
-        print("pump max on:", pump_max_on_s)
+    try:
+        if cmd == "pump":
+            pump_set(msg == "on")
+        elif cmd == "interval":
+            publish_interval_s = max(MIN_INTERVAL_S, int(msg))
+            print("publish interval:", publish_interval_s)
+        elif cmd == "pump-max-on":
+            pump_max_on_s = int(msg)
+            print("pump max on:", pump_max_on_s)
+        elif cmd == "listen":
+            control_listen_s = max(MIN_LISTEN_S, int(msg))
+            print("control listen:", control_listen_s)
+    except ValueError:
+        print("invalid control payload:", cmd, msg)
 
 
 def connect_mqtt():
@@ -218,39 +236,59 @@ def publish_readings():
 # endregion
 
 
-def recover():
-    """Mark the device offline, disconnect, and reset the board.
+def listen_for_control():
+    """Process incoming messages for control_listen_s seconds.
 
-    Errors while disconnecting are ignored: the connection is usually already
-    broken, and the reset follows regardless.
+    Retained control messages are delivered right after subscribing, so this
+    window is when they are applied. A "listen" message changes the window
+    itself: it takes effect immediately, and the new value is re-read on every
+    check, so a shorter window may end this one early.
     """
-    try:
-        mqtt_client.publish(topic("status"), b"offline", retain=True)
-        mqtt_client.disconnect()
-    except Exception:
-        pass
-    machine.reset()
-
-
-try:
-    mqtt_client = connect_mqtt()
-except OSError as e:
-    print("MQTT connect failed:", e)
-    recover()
-
-last_publish = time.ticks_add(time.ticks_ms(), -publish_interval_s * MS_PER_S)
-while True:
-    try:
+    start = time.ticks_ms()
+    while time.ticks_diff(time.ticks_ms(), start) < control_listen_s * MS_PER_S:
         mqtt_client.check_msg()
-        now = time.ticks_ms()
-        if time.ticks_diff(now, last_publish) >= publish_interval_s * MS_PER_S:
-            publish_readings()
-            last_publish = now
-        if pump_on_since is not None and time.ticks_diff(now, pump_on_since) >= pump_max_on_s * MS_PER_S:
+        time.sleep_ms(50)
+
+
+def wait_for_pump():
+    """Stay awake while the pump runs, enforcing the pump_max_on_s cutoff."""
+    while pump_on_since is not None:
+        mqtt_client.check_msg()
+        if time.ticks_diff(time.ticks_ms(), pump_on_since) >= pump_max_on_s * MS_PER_S:
             pump_set(False)
             mqtt_client.publish(topic("pump/state"), b"off")
-    except OSError as e:
-        print("MQTT error:", e)
+        time.sleep_ms(100)
+
+
+def run_cycle():
+    """Run one awake cycle: connect, apply control messages, publish, disconnect.
+
+    Always leaves the pump and the sensor power off, even on failure, so the
+    caller can go straight to sleep.
+    """
+    global mqtt_client
+    power.value(1)
+    try:
+        print("cycle: connecting MQTT")
+        mqtt_client = connect_mqtt()
+        print("cycle: listening for control")
+        listen_for_control()
+        print("cycle: publishing")
+        publish_readings()
+        wait_for_pump()
+        mqtt_client.publish(topic("status"), b"sleeping", retain=True)
+        mqtt_client.disconnect()
+        print("cycle: done")
+    except Exception as e:  # any failure must still end in sleep, not an idle awake board
+        print("Cycle failed:", e)
+    finally:
         pump_set(False)
-        recover()
-    time.sleep_ms(100)
+        power.value(0)
+
+
+while True:
+    run_cycle()
+    if DEEP_SLEEP:
+        print("deep sleep for", publish_interval_s, "s")
+        machine.deepsleep(publish_interval_s * MS_PER_S)  # wakes through boot.py
+    time.sleep(publish_interval_s)

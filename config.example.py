@@ -14,5 +14,6 @@ MQTT_TOPIC_DEVICES_SUB = "watering/higrow-01/control/#"
 
 TZ_OFFSET = -3  # hours from UTC, display only
 
-PUBLISH_INTERVAL_S = 60
+PUBLISH_INTERVAL_S = 600  # deep-sleep time between cycles
+DEEP_SLEEP = True  # set False while developing so ampy/REPL stay reachable
 PUMP_MAX_ON_S = 30  # safety cutoff

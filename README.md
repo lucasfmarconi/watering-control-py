@@ -13,7 +13,7 @@ MicroPython watering controller for the [LilyGO HiGrow](https://github.com/Xinyu
 | File | Purpose |
 |---|---|
 | `boot.py` | Wi-Fi (STA, with timeout) + NTP sync |
-| `main.py` | Init peripherals, connect MQTT, non-blocking loop |
+| `main.py` | One awake cycle (connect, read control messages, publish), then deep sleep |
 | `config.py` | Secrets and tunables (gitignored) |
 | `config.example.py` | Committed template |
 | `deploy.sh` | ampy wrapper |
@@ -32,7 +32,8 @@ cp config.example.py config.py
 | `MQTT_TOPIC_BASE` | Base for published topics |
 | `MQTT_TOPIC_DEVICES_SUB` | Control subscription (`<base>/control/#`) |
 | `TZ_OFFSET` | Hours from UTC (display only) |
-| `PUBLISH_INTERVAL_S` | Seconds between publishes |
+| `PUBLISH_INTERVAL_S` | Seconds of deep sleep between cycles |
+| `DEEP_SLEEP` | `True` (default) to deep-sleep between cycles; `False` keeps the board reachable while developing |
 | `PUMP_MAX_ON_S` | Safety cutoff for the pump |
 
 > TLS: the broker certificate is verified against `emqxsl-ca.der` (DigiCert Global Root G2, the EMQX Cloud CA). Verification needs correct time, so NTP in `boot.py` must succeed. Regenerate the DER with `openssl x509 -in emqxsl-ca.crt -outform der -out emqxsl-ca.der`.
@@ -55,7 +56,7 @@ Published (`<base>/...`):
 
 | Topic | Notes |
 |---|---|
-| `status` | retained: `online` / `offline` (last will) |
+| `status` | retained: `online` while awake, `sleeping` before deep sleep, `offline` (last will) after an unclean drop |
 | `dht/temperature`, `dht/humidity`, `dht/data-timestamp` | DHT11; timestamp is ISO-8601 UTC |
 | `soil/moisture`, `soil/data-timestamp` | percent |
 | `battery/voltage` | volts |
@@ -69,6 +70,15 @@ Control (`<base>/control/<cmd>`):
 | `pump` | `on` / `off` |
 | `interval` | seconds between publishes |
 | `pump-max-on` | pump cutoff in seconds |
+| `listen` | seconds to listen for control messages after connecting (min 1, default 3) |
+
+Control messages should be published **retained**. The board sleeps between cycles and only listens for a few seconds after connecting (`CONTROL_LISTEN_S` in `main.py`, or the `listen` command), which is when retained messages are delivered and applied. `interval` is applied to the sleep that follows, with a 10 s minimum. A retained `pump on` runs the pump on every cycle until `pump-max-on` cuts it off, so clear it (or publish `off`) when done.
+
+## Power saving
+
+Each cycle: power the sensors, connect Wi-Fi/NTP (`boot.py`) and MQTT, apply control messages, publish, then cut sensor power and deep-sleep. The BH1750 is read in one-time mode. The pump is always switched off before sleeping.
+
+With `DEEP_SLEEP = True` the board resets on every wake and its USB serial drops while asleep, so `ampy` only works during the awake window. Set `DEEP_SLEEP = False` in `config.py` while developing.
 
 ## Pinout (HiGrow)
 
