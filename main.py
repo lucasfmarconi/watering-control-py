@@ -65,7 +65,7 @@ def setup_adc(pin_no):
 
 soil_adc = setup_adc(PIN_SOIL)
 bat_adc = setup_adc(PIN_BAT)
-salt_adc = setup_adc(PIN_SALT)  # input-only pin, fine for ADC; read in a later task
+salt_adc = setup_adc(PIN_SALT)  # input-only pin, fine for ADC
 HAS_READ_UV = hasattr(bat_adc, "read_uv")  # factory-calibrated reading, if the firmware has it
 # endregion
 
@@ -315,6 +315,9 @@ def publish_readings():
     else:
         send("soil/error", soil_err)
     send("soil/data-timestamp", ts)
+    salt_raw = read_adc_median(salt_adc)[0]
+    print("salt raw:", salt_raw)
+    send("salt/raw", str(salt_raw))
     send("battery/voltage", str(read_battery_v()))
     lux = read_lux()
     if lux is not None:

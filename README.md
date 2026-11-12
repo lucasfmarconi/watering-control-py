@@ -65,6 +65,7 @@ Published (`<base>/...`):
 | `soil/moisture`, `soil/data-timestamp` | percent; `soil/moisture` is skipped when the reading is invalid |
 | `soil/raw` | median raw 12-bit ADC value, published every cycle (even when the reading is invalid) for recalibration |
 | `soil/error` | short reason instead of `soil/moisture` when the reading is invalid: `rail-low` (raw < 50), `rail-high` (raw > 4040), `noisy` (spread above `ADC_MAX_SPREAD`), `bad-calibration` (dry == wet) |
+| `salt/raw` | median raw ADC value of the salt electrodes (GPIO34). Relative and uncalibrated, not a unit; see "Salt reading" |
 | `battery/voltage` | volts |
 | `light/lux` | BH1750 |
 
@@ -89,7 +90,7 @@ With `DEEP_SLEEP = True` the board resets on every wake and its USB serial drops
 |---|---|---|
 | DHT11 | 16 | |
 | Soil moisture | 32 | ADC |
-| Salt | 34 | ADC, not used yet |
+| Salt | 34 | ADC, input-only |
 | Battery | 33 | ADC |
 | Sensor power | 4 | drive HIGH to power sensors |
 | I2C SDA / SCL | 25 / 26 | BH1750 at 0x23 |
