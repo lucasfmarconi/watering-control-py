@@ -62,6 +62,7 @@ Published (`<base>/...`):
 | `status` | retained: `online` while awake, `sleeping` before deep sleep, `offline` (last will) after an unclean drop |
 | `dht/temperature`, `dht/humidity`, `dht/data-timestamp` | DHT11; timestamp is ISO-8601 UTC |
 | `soil/moisture`, `soil/data-timestamp` | percent; `soil/moisture` is skipped when the reading is invalid |
+| `soil/raw` | median raw 12-bit ADC value, published every cycle (even when the reading is invalid) for recalibration |
 | `soil/error` | short reason instead of `soil/moisture` when the reading is invalid: `rail-low` (raw < 50), `rail-high` (raw > 4040), `noisy` (spread above `ADC_MAX_SPREAD`), `bad-calibration` (dry == wet) |
 | `battery/voltage` | volts |
 | `light/lux` | BH1750 |

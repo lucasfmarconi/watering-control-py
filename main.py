@@ -309,6 +309,7 @@ def publish_readings():
         send("dht/data-timestamp", ts)
     wait_since_power(SENSOR_SETTLE_MS)
     pct, raw, spread, soil_err = read_soil()
+    send("soil/raw", str(raw))  # also when invalid, to help diagnose and recalibrate
     if soil_err is None:
         send("soil/moisture", str(pct))
     else:
