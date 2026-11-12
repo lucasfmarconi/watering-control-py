@@ -66,7 +66,7 @@ Published (`<base>/...`):
 | `soil/moisture`, `soil/data-timestamp` | percent; `soil/moisture` is skipped when the reading is invalid |
 | `soil/raw` | median raw 12-bit ADC value, published every cycle (even when the reading is invalid) for recalibration |
 | `soil/error` | short reason instead of `soil/moisture` when the reading is invalid: `rail-low` (raw < 50), `rail-high` (raw > 4040), `noisy` (spread above `ADC_MAX_SPREAD`), `bad-calibration` (dry == wet) |
-| `salt/raw` | median raw ADC value of the salt electrodes (GPIO34). Relative and uncalibrated, not a unit; see "Salt reading" |
+| `salt/raw` | median raw ADC value of the salt electrodes (GPIO34). Relative and uncalibrated, not a unit; see [Salt reading](#salt-reading) |
 | `salt/valid` | `true` / `false`: `true` only when the soil moisture percent is inside the `SALT_MOISTURE_*` band (always `false` if the soil reading was invalid). Chart only the valid `salt/raw` readings |
 | `salt/last-fertilized` | retained; republished from the `fertilized` control message so a dashboard can annotate the chart. A marker only, it changes no readings |
 | `battery/voltage` | volts |
@@ -88,6 +88,15 @@ Control messages should be published **retained**. The board sleeps between cycl
 Each cycle: power the sensors (the wait for them to settle overlaps the Wi-Fi/MQTT connect), connect Wi-Fi/NTP (`boot.py`) and MQTT, apply control messages, publish, then cut sensor power and deep-sleep. The BH1750 is read in one-time mode. Soil and battery are each the median of `ADC_SAMPLES` readings (about 75 ms each).
 
 With `DEEP_SLEEP = True` the board resets on every wake and its USB serial drops while asleep, so `ampy` only works during the awake window. Set `DEEP_SLEEP = False` in `config.py` while developing.
+
+## Salt reading
+
+`salt/raw` is the raw ADC count from the HiGrow salt electrodes. It is a **relative, uncalibrated** indicator, not a conductivity (EC) value, and it depends strongly on soil moisture and temperature. Only compare readings taken at **similar soil moisture**: `salt/valid` is `true` when the soil moisture percent is inside the `SALT_MOISTURE_MIN`..`SALT_MOISTURE_MAX` band (default 55-75%), so chart only those readings. The electrodes can corrode if left powered, so they are only powered during the read (GPIO4 is switched off before sleep).
+
+Reading the trend (valid readings only):
+
+- After fertilizing, expect a gradual rise that falls again after a thorough watering/flush. Publish a retained `control/fertilized` message when you fertilize so it shows up as `salt/last-fertilized` and you can mark it on the chart.
+- A baseline that keeps rising at the same moisture, week after week, may mean over-fertilizing or salt buildup.
 
 ## Pinout (HiGrow)
 

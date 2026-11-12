@@ -372,6 +372,8 @@ def publish_readings():
     else:
         send("soil/error", soil_err)
     send("soil/data-timestamp", ts)
+    # Relative, uncalibrated indicator (not EC); only comparable at similar soil
+    # moisture, hence salt/valid. See "Salt reading" in the README.
     salt_raw = read_adc_median(salt_adc)[0]
     print("salt raw:", salt_raw)
     send("salt/raw", str(salt_raw))
