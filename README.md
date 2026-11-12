@@ -68,6 +68,7 @@ Published (`<base>/...`):
 | `soil/error` | short reason instead of `soil/moisture` when the reading is invalid: `rail-low` (raw < 50), `rail-high` (raw > 4040), `noisy` (spread above `ADC_MAX_SPREAD`), `bad-calibration` (dry == wet) |
 | `salt/raw` | median raw ADC value of the salt electrodes (GPIO34). Relative and uncalibrated, not a unit; see "Salt reading" |
 | `salt/valid` | `true` / `false`: `true` only when the soil moisture percent is inside the `SALT_MOISTURE_*` band (always `false` if the soil reading was invalid). Chart only the valid `salt/raw` readings |
+| `salt/last-fertilized` | retained; republished from the `fertilized` control message so a dashboard can annotate the chart. A marker only, it changes no readings |
 | `battery/voltage` | volts |
 | `light/lux` | BH1750 |
 
@@ -77,6 +78,7 @@ Control (`<base>/control/<cmd>`):
 |---|---|
 | `interval` | seconds between publishes |
 | `listen` | seconds to listen for control messages after connecting (min 1, default 3) |
+| `fertilized` | any text, e.g. an ISO date (max 64 chars). Republished retained as `salt/last-fertilized` |
 | `soil_dry`, `soil_wet` | raw ADC value (integer 0-4095) for the 0% / 100% soil point. Applied immediately and saved to `calibration.json` on the board, only when it changes. Dry and wet must differ; invalid payloads are ignored and logged |
 
 Control messages should be published **retained**. The board sleeps between cycles and only listens for a few seconds after connecting (`CONTROL_LISTEN_S` in `main.py`, or the `listen` command), which is when retained messages are delivered and applied. `interval` is applied to the sleep that follows, with a 10 s minimum. Soil calibration precedence is `config.py` < `calibration.json` < retained `soil_dry` / `soil_wet`, so to go back to `config.py` values clear the retained messages and delete `calibration.json` (`ampy rm calibration.json`).

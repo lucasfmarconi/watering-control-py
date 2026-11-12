@@ -52,6 +52,7 @@ soil_raw_wet = getattr(config, "SOIL_RAW_WET", 1200)  # the "100%" point
 
 # region init
 power_on_ms = None  # ticks when GPIO4 last went high
+fertilized_marker = None  # last control/fertilized payload, republished as salt/last-fertilized
 publish_interval_s = config.PUBLISH_INTERVAL_S
 control_listen_s = CONTROL_LISTEN_S
 
@@ -284,6 +285,8 @@ def on_message(topic_bytes, msg):
 
     - interval: new sleep time between cycles in seconds (at least MIN_INTERVAL_S).
     - listen: new control listen window in seconds (at least MIN_LISTEN_S).
+    - fertilized: any payload (e.g. an ISO date). Only a marker: it is republished
+      as salt/last-fertilized and changes no readings.
     - soil_dry / soil_wet: new raw ADC value (0-4095) for the 0% / 100% soil point.
       Applied now and saved to CALIBRATION_FILE when it changed; dry and wet must
       differ.
@@ -295,7 +298,7 @@ def on_message(topic_bytes, msg):
         topic_bytes: Topic the message arrived on, as bytes.
         msg: Message payload, as bytes.
     """
-    global publish_interval_s, control_listen_s
+    global publish_interval_s, control_listen_s, fertilized_marker
     cmd = topic_bytes.decode().split("/control/", 1)[-1]
     msg = msg.decode().strip()
     try:
@@ -305,6 +308,9 @@ def on_message(topic_bytes, msg):
         elif cmd == "listen":
             control_listen_s = max(MIN_LISTEN_S, int(msg))
             print("control listen:", control_listen_s)
+        elif cmd == "fertilized":
+            fertilized_marker = msg[:64]
+            print("fertilized:", fertilized_marker)
         elif cmd == "soil_dry":
             set_soil_calibration(int(msg), soil_raw_wet)
         elif cmd == "soil_wet":
@@ -370,6 +376,8 @@ def publish_readings():
     print("salt raw:", salt_raw)
     send("salt/raw", str(salt_raw))
     send("salt/valid", "true" if calc.salt_valid(pct, SALT_MOISTURE_MIN, SALT_MOISTURE_MAX) else "false")
+    if fertilized_marker is not None:
+        send("salt/last-fertilized", fertilized_marker, retain=True)
     send("battery/voltage", str(read_battery_v()))
     lux = read_lux()
     if lux is not None:
