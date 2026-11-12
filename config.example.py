@@ -16,3 +16,6 @@ TZ_OFFSET = -3  # hours from UTC, display only
 
 PUBLISH_INTERVAL_S = 600  # deep-sleep time between cycles
 DEEP_SLEEP = True  # set False while developing so ampy/REPL stay reachable
+
+ADC_SAMPLES = 15  # readings per ADC sample, median taken (allowed 10-20)
+ADC_SAMPLE_DELAY_MS = 5  # pause between those readings

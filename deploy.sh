@@ -10,6 +10,7 @@ if [ -n "$1" ]; then
 else
     ampy put config.py && echo "  config.py"
     ampy put boot.py   && echo "  boot.py"
+    ampy put calc.py   && echo "  calc.py"
     ampy put main.py   && echo "  main.py"
     ampy put emqxsl-ca.der && echo "  emqxsl-ca.der"
 fi

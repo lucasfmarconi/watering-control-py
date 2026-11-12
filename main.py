@@ -6,6 +6,7 @@ import network
 import dht
 from umqtt.simple import MQTTClient
 
+import calc
 import config
 
 # region constants
@@ -26,6 +27,9 @@ MS_PER_S = 1000
 CONTROL_LISTEN_S = 3  # default awake window to receive retained control messages
 MIN_LISTEN_S = 1  # lower bound for the "listen" command; 0 would make the board deaf to control
 MIN_INTERVAL_S = 10  # lower bound for the "interval" command (protects the battery)
+# Samples per ADC reading (10-20) and the pause between them
+ADC_SAMPLES = max(10, min(20, getattr(config, "ADC_SAMPLES", 15)))
+ADC_SAMPLE_DELAY_MS = getattr(config, "ADC_SAMPLE_DELAY_MS", 5)
 DEEP_SLEEP = getattr(config, "DEEP_SLEEP", True)  # set False in config.py while developing
 
 # Soil sensor calibration (raw 12-bit ADC). Placeholder values: measure your own
@@ -73,6 +77,28 @@ except (OSError, ValueError) as e:
     i2c = None
 
 
+def read_adc_median(adc, samples=ADC_SAMPLES, delay_ms=ADC_SAMPLE_DELAY_MS, microvolts=False):
+    """Sample an ADC repeatedly and return (median, spread).
+
+    The median ignores outliers from Wi-Fi or power spikes. spread is
+    max - min of the samples. Samples are taken with ADC.read_uv() when
+    microvolts is True, otherwise with ADC.read().
+
+    Args:
+        adc: The machine.ADC to sample.
+        samples: Number of readings to take.
+        delay_ms: Pause between readings.
+        microvolts: Read calibrated microvolts instead of the raw count.
+    """
+    read = adc.read_uv if microvolts else adc.read
+    values = []
+    for i in range(samples):
+        if i:
+            time.sleep_ms(delay_ms)
+        values.append(read())
+    return calc.median(values), calc.spread(values)
+
+
 def read_soil_pct():
     """Return soil moisture as an integer percentage, 0 (dry) to 100 (wet).
 
@@ -85,12 +111,12 @@ def read_soil_pct():
     The result is clamped to 0-100, since readings can fall outside the
     calibrated range.
 
-    Calibration: print soil_adc.read() with the sensor in dry air and set
+    Calibration: print the median raw reading with the sensor in dry air and set
     SOIL_DRY_RAW; then submerge it in water (up to the marked line) and set
     SOIL_WET_RAW. Using the full 0-4095 range instead would never reach 0% or
     100%, because real sensors only span part of the ADC range.
     """
-    raw = soil_adc.read()
+    raw = read_adc_median(soil_adc)[0]
     pct = (SOIL_DRY_RAW - raw) * 100 / (SOIL_DRY_RAW - SOIL_WET_RAW)
     return max(0, min(100, round(pct)))
 
@@ -110,8 +136,8 @@ def read_battery_v():
       it if the reading is off.
     """
     if HAS_READ_UV:
-        return round(bat_adc.read_uv() / 1e6 * BATTERY_DIVIDER, 2)
-    return round(bat_adc.read() / ADC_MAX * 6.6 * 1.1, 2)
+        return round(read_adc_median(bat_adc, microvolts=True)[0] / 1e6 * BATTERY_DIVIDER, 2)
+    return round(read_adc_median(bat_adc)[0] / ADC_MAX * 6.6 * 1.1, 2)
 
 
 def read_lux():
