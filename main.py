@@ -1,3 +1,4 @@
+import json
 import ssl
 import time
 
@@ -6,6 +7,7 @@ import network
 import dht
 from umqtt.simple import MQTTClient
 
+import calc
 import config
 
 # region constants
@@ -19,29 +21,61 @@ PIN_I2C_SDA = 25
 PIN_I2C_SCL = 26
 BH1750_ADDR = 0x23
 BH1750_MEASURE_MS = 180  # max high-res measurement time
+CALIBRATION_FILE = "calibration.json"  # soil calibration set over MQTT, survives deep sleep
 CA_FILE = "emqxsl-ca.der"  # DigiCert Global Root G2, DER
 ADC_MAX = 4095  # 12-bit ADC full scale
+BATTERY_DIVIDER = 2  # the battery reaches the ADC pin through a divider that halves it
 MS_PER_S = 1000
 CONTROL_LISTEN_S = 3  # default awake window to receive retained control messages
 MIN_LISTEN_S = 1  # lower bound for the "listen" command; 0 would make the board deaf to control
 MIN_INTERVAL_S = 10  # lower bound for the "interval" command (protects the battery)
+# Samples per ADC reading (10-20) and the pause between them
+ADC_SAMPLES = max(10, min(20, getattr(config, "ADC_SAMPLES", 15)))
+ADC_SAMPLE_DELAY_MS = getattr(config, "ADC_SAMPLE_DELAY_MS", 5)
+SENSOR_SETTLE_MS = getattr(config, "SENSOR_SETTLE_MS", 300)  # after GPIO4 goes high, before ADC reads
+DHT_SETTLE_MS = 1000  # DHT11 needs ~1 s after power-up
+DHT_RETRY_MS = 1000  # and at most one read per second
+DHT_ATTEMPTS = 3
+ADC_MAX_SPREAD = getattr(config, "ADC_MAX_SPREAD", 250)  # largest max-min of the samples still trusted
+# salt/raw is only comparable between readings at similar soil moisture, so salt/valid
+# flags the readings taken inside this band
+SALT_MOISTURE_MIN = getattr(config, "SALT_MOISTURE_MIN", 55)
+SALT_MOISTURE_MAX = getattr(config, "SALT_MOISTURE_MAX", 75)
+PUBLISH_DIAGNOSTICS = getattr(config, "PUBLISH_DIAGNOSTICS", False)  # also publish soil/raw-spread
 DEEP_SLEEP = getattr(config, "DEEP_SLEEP", True)  # set False in config.py while developing
 
-# Soil sensor calibration (raw 12-bit ADC). Placeholder values: measure your own
-# sensor (see read_soil_pct) and replace them.
-SOIL_DRY_RAW = 2800  # sensor held in dry air
-SOIL_WET_RAW = 1200  # sensor submerged in water up to the marked line
+# Soil calibration (raw 12-bit ADC), set in config.py; see config.example.py for how
+# to measure them. The defaults are placeholders for a typical capacitive probe.
+# Precedence: config.py < calibration.json < retained control/soil_dry|soil_wet.
+soil_raw_dry = getattr(config, "SOIL_RAW_DRY", 2800)  # the "0%" point
+soil_raw_wet = getattr(config, "SOIL_RAW_WET", 1200)  # the "100%" point
 # endregion
 
 # region init
+power_on_ms = None  # ticks when GPIO4 last went high
+fertilized_marker = None  # last control/fertilized payload, republished as salt/last-fertilized
 publish_interval_s = config.PUBLISH_INTERVAL_S
 control_listen_s = CONTROL_LISTEN_S
 
 power = machine.Pin(PIN_POWER_CTRL, machine.Pin.OUT, value=0)  # on only during a cycle
-soil_adc = machine.ADC(machine.Pin(PIN_SOIL))
-soil_adc.atten(machine.ADC.ATTN_11DB)
-bat_adc = machine.ADC(machine.Pin(PIN_BAT))
-bat_adc.atten(machine.ADC.ATTN_11DB)
+
+
+def setup_adc(pin_no):
+    """Create an ADC on pin_no covering ~0-3.3 V at 12 bits.
+
+    The ESP32 ADC is nonlinear near the rails (below ~0.1 V and above ~3.1 V at
+    11 dB), so readings close to 0 or 4095 are less trustworthy.
+    """
+    adc = machine.ADC(machine.Pin(pin_no))
+    adc.atten(machine.ADC.ATTN_11DB)
+    adc.width(machine.ADC.WIDTH_12BIT)
+    return adc
+
+
+soil_adc = setup_adc(PIN_SOIL)
+bat_adc = setup_adc(PIN_BAT)
+salt_adc = setup_adc(PIN_SALT)  # input-only pin, fine for ADC
+HAS_READ_UV = hasattr(bat_adc, "read_uv")  # factory-calibrated reading, if the firmware has it
 # endregion
 
 # region sensors
@@ -58,26 +92,133 @@ except (OSError, ValueError) as e:
     i2c = None
 
 
-def read_soil_pct():
-    """Return soil moisture as an integer percentage, 0 (dry) to 100 (wet).
+def load_calibration():
+    """Apply the soil calibration saved by a previous cycle, if any."""
+    global soil_raw_dry, soil_raw_wet
+    try:
+        with open(CALIBRATION_FILE) as f:
+            saved = json.load(f)
+        dry, wet = saved["dry"], saved["wet"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    if calc.valid_soil_calibration(dry, wet):
+        soil_raw_dry, soil_raw_wet = dry, wet
+    else:
+        print("ignoring invalid", CALIBRATION_FILE)
+
+
+def save_calibration():
+    """Persist the soil calibration. Called only when it changed, to spare the flash."""
+    try:
+        with open(CALIBRATION_FILE, "w") as f:
+            json.dump({"dry": soil_raw_dry, "wet": soil_raw_wet}, f)
+    except OSError as e:
+        print("saving calibration failed:", e)
+
+
+def set_soil_calibration(dry, wet):
+    """Validate and apply a new soil calibration, saving it only if it changed."""
+    global soil_raw_dry, soil_raw_wet
+    if not calc.valid_soil_calibration(dry, wet):
+        print("invalid soil calibration:", dry, wet)
+        return
+    if (dry, wet) == (soil_raw_dry, soil_raw_wet):
+        return
+    soil_raw_dry, soil_raw_wet = dry, wet
+    save_calibration()
+    print("soil calibration: dry", dry, "wet", wet)
+
+
+def read_adc_median(adc, samples=ADC_SAMPLES, delay_ms=ADC_SAMPLE_DELAY_MS, microvolts=False):
+    """Sample an ADC repeatedly and return (median, spread).
+
+    The median ignores outliers from Wi-Fi or power spikes. spread is
+    max - min of the samples. Samples are taken with ADC.read_uv() when
+    microvolts is True, otherwise with ADC.read().
+
+    Args:
+        adc: The machine.ADC to sample.
+        samples: Number of readings to take.
+        delay_ms: Pause between readings.
+        microvolts: Read calibrated microvolts instead of the raw count.
+    """
+    read = adc.read_uv if microvolts else adc.read
+    values = []
+    for i in range(samples):
+        if i:
+            time.sleep_ms(delay_ms)
+        values.append(read())
+    return calc.median(values), calc.spread(values)
+
+
+def power_sensors():
+    """Power the sensors (GPIO4 high) and remember when."""
+    global power_on_ms
+    power.value(1)
+    power_on_ms = time.ticks_ms()
+
+
+def wait_since_power(settle_ms):
+    """Sleep only for what is left of settle_ms since the sensors were powered.
+
+    Connecting Wi-Fi/MQTT already takes seconds, so this is normally a no-op.
+    """
+    if power_on_ms is None:
+        return
+    remaining = settle_ms - time.ticks_diff(time.ticks_ms(), power_on_ms)
+    if remaining > 0:
+        time.sleep_ms(remaining)
+
+
+def read_dht():
+    """Return (temperature, humidity) from the DHT11, or None if it never answers.
+
+    Waits for the sensor to settle after power-up and retries on OSError,
+    pausing DHT_RETRY_MS between attempts (the DHT11 allows one read per second).
+    """
+    if dht_sensor is None:
+        return None
+    wait_since_power(DHT_SETTLE_MS)
+    for attempt in range(DHT_ATTEMPTS):
+        try:
+            dht_sensor.measure()
+            return dht_sensor.temperature(), dht_sensor.humidity()
+        except OSError as e:
+            print("DHT read failed:", e)
+            if attempt < DHT_ATTEMPTS - 1:
+                time.sleep_ms(DHT_RETRY_MS)
+    return None
+
+
+def read_soil():
+    """Read the soil probe and return (pct, raw, spread, error).
 
     Capacitive sensors output a higher voltage (higher ADC value) when dry and a
     lower one when wet, so the reading is inverted and linearly mapped between
-    two calibration points:
+    two calibration points (see calc.raw_to_percent):
 
-        pct = (SOIL_DRY_RAW - raw) * 100 / (SOIL_DRY_RAW - SOIL_WET_RAW)
+        pct = (soil_raw_dry - raw) * 100 / (soil_raw_dry - soil_raw_wet)
 
-    The result is clamped to 0-100, since readings can fall outside the
-    calibrated range.
+    The reading is checked before it is converted (calc.soil_error): a value at
+    the ADC rails or a large spread means the probe is unplugged, shorted or
+    noisy. In that case pct is None and error says why, so a disconnected probe
+    never looks like "0%, needs watering". Only valid readings are clamped to
+    0-100.
 
-    Calibration: print soil_adc.read() with the sensor in dry air and set
-    SOIL_DRY_RAW; then submerge it in water (up to the marked line) and set
-    SOIL_WET_RAW. Using the full 0-4095 range instead would never reach 0% or
-    100%, because real sensors only span part of the ADC range.
+    Calibration lives in config.py (SOIL_RAW_DRY / SOIL_RAW_WET) and can be
+    overridden over MQTT (see on_message); read the values from the soil/raw topic. Using the full 0-4095 range instead would
+    never reach 0% or 100%, because real sensors only span part of the ADC
+    range.
     """
-    raw = soil_adc.read()
-    pct = (SOIL_DRY_RAW - raw) * 100 / (SOIL_DRY_RAW - SOIL_WET_RAW)
-    return max(0, min(100, round(pct)))
+    raw, spread = read_adc_median(soil_adc)
+    print("soil raw:", raw, "spread:", spread)
+    error = calc.soil_error(raw, spread, ADC_MAX_SPREAD)
+    if error is not None:
+        return None, raw, spread, error
+    pct = calc.raw_to_percent(raw, soil_raw_dry, soil_raw_wet)
+    if pct is None:
+        return None, raw, spread, "bad-calibration"
+    return pct, raw, spread, None
 
 
 def read_battery_v():
@@ -85,17 +226,18 @@ def read_battery_v():
 
     The battery is wired to the ADC pin through a voltage divider that halves
     it (the pin sees about Vbat / 2), because a LiPo can reach 4.2 V, above the
-    ADC's ~3.3 V range. The conversion is:
+    ADC's ~3.3 V range.
 
-        V = raw / 4095 * 6.6 * 1.1
-
-    - raw / 4095 * 3.3 would be the voltage at the pin, so * 6.6 (3.3 * 2)
-      undoes the divider and gives the battery voltage.
-    - 1.1 is an empirical correction for the ESP32 ADC, which is not exactly
-      linear at ATTN_11DB and does not match the nominal 3.3 V full scale.
-      Compare against a multimeter and adjust it if the reading is off.
+    - With ADC.read_uv() (HAS_READ_UV), which applies the factory calibration:
+      V = microvolts / 1e6 * BATTERY_DIVIDER.
+    - Otherwise: V = raw / 4095 * 6.6 * 1.1, where 6.6 is 3.3 * 2 (undoing the
+      divider) and 1.1 is an empirical correction for the ESP32 ADC, which is
+      not exactly linear at ATTN_11DB. Compare against a multimeter and adjust
+      it if the reading is off.
     """
-    return round(bat_adc.read() / ADC_MAX * 6.6 * 1.1, 2)
+    if HAS_READ_UV:
+        return round(read_adc_median(bat_adc, microvolts=True)[0] / 1e6 * BATTERY_DIVIDER, 2)
+    return round(read_adc_median(bat_adc)[0] / ADC_MAX * 6.6 * 1.1, 2)
 
 
 def read_lux():
@@ -144,6 +286,11 @@ def on_message(topic_bytes, msg):
 
     - interval: new sleep time between cycles in seconds (at least MIN_INTERVAL_S).
     - listen: new control listen window in seconds (at least MIN_LISTEN_S).
+    - fertilized: any payload (e.g. an ISO date). Only a marker: it is republished
+      as salt/last-fertilized and changes no readings.
+    - soil_dry / soil_wet: new raw ADC value (0-4095) for the 0% / 100% soil point.
+      Applied now and saved to CALIBRATION_FILE when it changed; dry and wet must
+      differ.
 
     Invalid numbers are ignored. Control messages should be published retained,
     since the device is only listening briefly each cycle.
@@ -152,7 +299,7 @@ def on_message(topic_bytes, msg):
         topic_bytes: Topic the message arrived on, as bytes.
         msg: Message payload, as bytes.
     """
-    global publish_interval_s, control_listen_s
+    global publish_interval_s, control_listen_s, fertilized_marker
     cmd = topic_bytes.decode().split("/control/", 1)[-1]
     msg = msg.decode().strip()
     try:
@@ -162,6 +309,13 @@ def on_message(topic_bytes, msg):
         elif cmd == "listen":
             control_listen_s = max(MIN_LISTEN_S, int(msg))
             print("control listen:", control_listen_s)
+        elif cmd == "fertilized":
+            fertilized_marker = msg[:64]
+            print("fertilized:", fertilized_marker)
+        elif cmd == "soil_dry":
+            set_soil_calibration(int(msg), soil_raw_wet)
+        elif cmd == "soil_wet":
+            set_soil_calibration(soil_raw_dry, int(msg))
     except ValueError:
         print("invalid control payload:", cmd, msg)
 
@@ -206,16 +360,29 @@ def send(suffix, payload, retain=False):
 def publish_readings():
     """Read all sensors and publish them, skipping any that are unavailable."""
     ts = iso_utc()
-    if dht_sensor is not None:
-        try:
-            dht_sensor.measure()
-            send("dht/temperature", str(dht_sensor.temperature()))
-            send("dht/humidity", str(dht_sensor.humidity()))
-            send("dht/data-timestamp", ts)
-        except OSError as e:
-            print("DHT read failed:", e)
-    send("soil/moisture", str(read_soil_pct()))
+    dht_reading = read_dht()
+    if dht_reading is not None:
+        send("dht/temperature", str(dht_reading[0]))
+        send("dht/humidity", str(dht_reading[1]))
+        send("dht/data-timestamp", ts)
+    wait_since_power(SENSOR_SETTLE_MS)
+    pct, raw, spread, soil_err = read_soil()
+    send("soil/raw", str(raw))  # also when invalid, to help diagnose and recalibrate
+    if PUBLISH_DIAGNOSTICS:
+        send("soil/raw-spread", str(spread))
+    if soil_err is None:
+        send("soil/moisture", str(pct))
+    else:
+        send("soil/error", soil_err)
     send("soil/data-timestamp", ts)
+    # Relative, uncalibrated indicator (not EC); only comparable at similar soil
+    # moisture, hence salt/valid. See "Salt reading" in the README.
+    salt_raw = read_adc_median(salt_adc)[0]
+    print("salt raw:", salt_raw)
+    send("salt/raw", str(salt_raw))
+    send("salt/valid", "true" if calc.salt_valid(pct, SALT_MOISTURE_MIN, SALT_MOISTURE_MAX) else "false")
+    if fertilized_marker is not None:
+        send("salt/last-fertilized", fertilized_marker, retain=True)
     send("battery/voltage", str(read_battery_v()))
     lux = read_lux()
     if lux is not None:
@@ -250,12 +417,12 @@ def radio_off():
 def run_cycle():
     """Run one awake cycle: connect, apply control messages, publish, disconnect.
 
-    Always leaves the sensor power off, even on failure, so the
+    Always leaves the sensor power (GPIO4) off, even on failure, so the
     caller can go straight to sleep.
     """
     global mqtt_client
-    power.value(1)
     try:
+        power_sensors()
         print("cycle: connecting MQTT")
         mqtt_client = connect_mqtt()
         print("cycle: listening for control")
@@ -271,6 +438,7 @@ def run_cycle():
         power.value(0)
 
 
+load_calibration()
 while True:
     run_cycle()
     if DEEP_SLEEP:
